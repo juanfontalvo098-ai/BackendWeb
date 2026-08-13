@@ -1,5 +1,4 @@
 // database/knex.js — Instancia singleton de Knex (PostgreSQL)
-// Reemplaza al antiguo connection.js basado en SQLite/sql.js
 const knexConfig = require('../knexfile');
 
 const environment = process.env.NODE_ENV || 'development';
@@ -18,7 +17,16 @@ knex.raw('SELECT 1')
   })
   .catch((err) => {
     console.error('❌ Error al conectar con PostgreSQL:', err.message);
-    console.error('   Verifica que PostgreSQL esté corriendo y las credenciales en .env sean correctas.');
+    if (err.message.includes('ECONNREFUSED 127.0.0.1') || err.message.includes('ECONNREFUSED localhost')) {
+      console.error('\n🔍 CAUSA PROBABLE DEL ERROR DE DESPLIEGUE:');
+      console.error('El servidor está intentando conectarse a 127.0.0.1:5432 porque no encontró la variable DATABASE_URL.');
+      console.error('👉 Solución: Entra al panel de control de tu plataforma de deploy (Render, Railway, VPS, etc.)');
+      console.error('   y agrega la variable de entorno:');
+      console.error('   DATABASE_URL = postgresql://usuario:password@host_servidor:5432/nombre_bd?sslmode=require\n');
+    } else {
+      console.error('   Verifica que PostgreSQL esté activo y las credenciales en la variable de entorno DATABASE_URL sean válidas.');
+    }
   });
 
 module.exports = knex;
+

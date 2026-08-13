@@ -1,77 +1,157 @@
-const db = require('../database/connection');
+/**
+ * Users Controller — Multi-tenant
+ * CRUD de usuarios filtrado por business_id
+ */
+const knex = require('../database/knex');
 const bcrypt = require('bcryptjs');
 
-exports.getAll = (req, res) => {
+exports.getAll = async (req, res) => {
   try {
-    const users = db.prepare('SELECT id, username, full_name, role, is_active, permissions, created_at FROM users').all();
+    const { businessId, branchId, isGlobalScope } = req.tenant;
+
+    let query = knex('users')
+      .select('id', 'username', 'full_name', 'role', 'is_active', 'permissions', 'branch_id', 'created_at')
+      .where('business_id', businessId);
+
+    // Si no es admin global, solo ve usuarios de su sucursal
+    if (!isGlobalScope && branchId) {
+      query.andWhere(function() {
+        this.where('branch_id', branchId).orWhereNull('branch_id');
+      });
+    }
+
+    const users = await query.orderBy('created_at', 'desc');
+
+    // Para cada usuario, obtener nombre de sucursal
+    const branches = await knex('branches').where('business_id', businessId);
+    const branchMap = {};
+    branches.forEach(b => branchMap[b.id] = b.name);
+
     users.forEach(u => {
-      try {
-        u.permissions = u.permissions ? JSON.parse(u.permissions) : null;
-      } catch (e) {
-        u.permissions = null;
+      u.branch_name = u.branch_id ? (branchMap[u.branch_id] || 'Sin asignar') : 'Todas las sucursales';
+      // JSONB ya viene como objeto en PostgreSQL, no necesita JSON.parse
+      if (typeof u.permissions === 'string') {
+        try { u.permissions = JSON.parse(u.permissions); } catch (e) { u.permissions = null; }
       }
     });
+
     res.json(users);
   } catch (err) {
+    console.error('Error al obtener usuarios:', err);
     res.status(500).json({ error: 'Error al obtener lista de usuarios' });
   }
 };
 
-exports.create = (req, res) => {
-  const { username, password, full_name, role, permissions } = req.body;
+exports.create = async (req, res) => {
+  const { username, password, full_name, role, permissions, branch_id } = req.body;
+  const { businessId } = req.tenant;
+
   if (!username || !password || !full_name || !role) {
     return res.status(400).json({ error: 'Todos los campos son obligatorios' });
   }
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-  if (existing) {
-    return res.status(400).json({ error: 'El nombre de usuario ya se encuentra registrado' });
-  }
-
   try {
+    // Verificar que el username no exista dentro del mismo negocio
+    const existing = await knex('users')
+      .where({ business_id: businessId, username })
+      .first();
+
+    if (existing) {
+      return res.status(400).json({ error: 'El nombre de usuario ya se encuentra registrado' });
+    }
+
+    // Si se especifica branch_id, validar que pertenece al negocio
+    if (branch_id) {
+      const branch = await knex('branches')
+        .where({ id: branch_id, business_id: businessId })
+        .first();
+      if (!branch) {
+        return res.status(400).json({ error: 'La sucursal especificada no existe o no pertenece a tu negocio' });
+      }
+    }
+
     const hash = bcrypt.hashSync(password, 10);
-    const permsStr = Array.isArray(permissions) ? JSON.stringify(permissions) : null;
-    const info = db.prepare('INSERT INTO users (username, password_hash, full_name, role, permissions) VALUES (?, ?, ?, ?, ?)')
-      .run(username, hash, full_name, role, permsStr);
-    res.status(201).json({ id: info.lastInsertRowid, message: 'Usuario creado exitosamente' });
+    const permsData = Array.isArray(permissions) ? JSON.stringify(permissions) : null;
+
+    const [newUser] = await knex('users').insert({
+      business_id: businessId,
+      branch_id: branch_id || null,
+      username,
+      password_hash: hash,
+      full_name,
+      role,
+      permissions: permsData
+    }).returning(['id', 'username', 'full_name', 'role']);
+
+    res.status(201).json({ id: newUser.id, message: 'Usuario creado exitosamente' });
   } catch (err) {
+    console.error('Error al crear usuario:', err);
     res.status(500).json({ error: 'Error al crear el usuario en la base de datos' });
   }
 };
 
-exports.update = (req, res) => {
+exports.update = async (req, res) => {
   const { id } = req.params;
-  const { full_name, role, is_active, password, permissions } = req.body;
+  const { full_name, role, is_active, password, permissions, branch_id } = req.body;
+  const { businessId } = req.tenant;
+
   try {
-    const permsStr = Array.isArray(permissions) ? JSON.stringify(permissions) : null;
-    if (password && password.trim() !== '') {
-      const hash = bcrypt.hashSync(password, 10);
-      db.prepare('UPDATE users SET full_name = ?, role = ?, is_active = ?, permissions = ?, password_hash = ?, updated_at = datetime("now") WHERE id = ?')
-        .run(full_name, role, is_active, permsStr, hash, id);
-    } else {
-      db.prepare('UPDATE users SET full_name = ?, role = ?, is_active = ?, permissions = ?, updated_at = datetime("now") WHERE id = ?')
-        .run(full_name, role, is_active, permsStr, id);
+    // Verificar que el usuario pertenece al mismo negocio
+    const user = await knex('users').where({ id, business_id: businessId }).first();
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
     }
+
+    const updateData = {
+      full_name,
+      role,
+      is_active,
+      permissions: Array.isArray(permissions) ? JSON.stringify(permissions) : null,
+      branch_id: branch_id || null,
+      updated_at: knex.fn.now()
+    };
+
+    if (password && password.trim() !== '') {
+      updateData.password_hash = bcrypt.hashSync(password, 10);
+    }
+
+    await knex('users')
+      .where({ id, business_id: businessId })
+      .update(updateData);
+
     res.json({ message: 'Usuario actualizado exitosamente' });
   } catch (err) {
+    console.error('Error al actualizar usuario:', err);
     res.status(500).json({ error: 'Error al actualizar información del usuario' });
   }
 };
 
-exports.remove = (req, res) => {
+exports.remove = async (req, res) => {
   const { id } = req.params;
+  const { businessId } = req.tenant;
+
   try {
-    db.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(id);
+    await knex('users')
+      .where({ id, business_id: businessId })
+      .update({ is_active: false, updated_at: knex.fn.now() });
     res.json({ message: 'Usuario desactivado exitosamente' });
   } catch (err) {
+    console.error('Error al desactivar usuario:', err);
     res.status(500).json({ error: 'Error al desactivar el usuario' });
   }
 };
 
-exports.deleteUser = (req, res) => {
+exports.deleteUser = async (req, res) => {
   const { id } = req.params;
+  const { businessId } = req.tenant;
+
   try {
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    const deleted = await knex('users')
+      .where({ id, business_id: businessId })
+      .del();
+    if (!deleted) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
     res.json({ message: 'Usuario eliminado definitivamente de la base de datos' });
   } catch (err) {
     res.status(400).json({ error: 'No se puede eliminar un usuario con transacciones asociadas. Te recomendamos desactivarlo.' });

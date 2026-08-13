@@ -1,76 +1,146 @@
-const db = require('../database/connection');
-const z = require('zod');
+/**
+ * Products Controller — Multi-tenant
+ * Productos filtrados por business_id con soporte para branch_id global
+ */
+const knex = require('../database/knex');
+const { addTenantFilter } = require('../middleware/tenant');
 
-const productSchema = z.object({
-  category_id: z.number().int(),
-  name: z.string().min(2),
-  description: z.string().optional(),
-  price: z.number().positive(),
-  tax_rate: z.number().optional().default(0.19),
-  tax_included: z.number().int().optional().default(1),
-  image_url: z.string().optional()
-});
-
-exports.getAll = (req, res) => {
-  const { category_id, search } = req.query;
-  let sql = 'SELECT p.*, c.name as category_name FROM products p JOIN categories c ON p.category_id = c.id WHERE p.is_available = 1';
-  let params = [];
-
-  if (category_id) {
-    sql += ' AND p.category_id = ?';
-    params.push(category_id);
-  }
-  if (search) {
-    sql += ' AND p.name LIKE ?';
-    params.push(`%${search}%`);
-  }
-
-  const products = db.prepare(sql).all(...params);
-  res.json(products);
-};
-
-exports.getById = (req, res) => {
-  const product = db.prepare('SELECT p.*, c.name as category_name FROM products p JOIN categories c ON p.category_id = c.id WHERE p.id = ?').get(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
-  res.json(product);
-};
-
-exports.create = (req, res) => {
+exports.getAll = async (req, res) => {
   try {
-    const data = productSchema.parse(req.body);
-    const info = db.prepare('INSERT INTO products (category_id, name, description, price, tax_rate, tax_included, image_url) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(data.category_id, data.name, data.description || null, data.price, data.tax_rate, data.tax_included, data.image_url || null);
-    res.status(201).json({ id: info.lastInsertRowid, message: 'Producto creado' });
-  } catch (err) {
-    if (err instanceof z.ZodError) return res.status(400).json({ error: err.errors });
-    res.status(500).json({ error: 'Error al crear producto' });
-  }
-};
+    const { category_id, search } = req.query;
 
-exports.update = (req, res) => {
-  try {
-    const data = productSchema.partial().parse(req.body);
-    let fields = [];
-    let values = [];
-    for (let key in data) {
-      if (data[key] !== undefined) {
-        fields.push(`${key} = ?`);
-        values.push(data[key]);
-      }
+    let query = knex('products as p')
+      .join('categories as c', 'p.category_id', 'c.id')
+      .select('p.*', 'c.name as category_name')
+      .where('p.is_available', true);
+
+    addTenantFilter(query, req.tenant, { allowGlobalBranch: true, tableAlias: 'p' });
+
+    if (category_id) {
+      query.andWhere('p.category_id', parseInt(category_id, 10));
     }
-    if (fields.length === 0) return res.json({ message: 'Sin cambios' });
-    
-    fields.push('updated_at = datetime("now")');
-    values.push(req.params.id);
-    
-    db.prepare(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    res.json({ message: 'Producto actualizado' });
+    if (search) {
+      query.andWhere('p.name', 'ilike', `%${search}%`);
+    }
+
+    const products = await query.orderBy('c.sort_order').orderBy('p.name');
+    res.json(products);
   } catch (err) {
-    res.status(500).json({ error: 'Error al actualizar producto' });
+    console.error('Error al obtener productos:', err);
+    res.status(500).json({ error: 'Error al obtener productos' });
   }
 };
 
-exports.remove = (req, res) => {
-  db.prepare('UPDATE products SET is_available = 0, updated_at = datetime("now") WHERE id = ?').run(req.params.id);
-  res.json({ message: 'Producto eliminado lógicamente' });
+exports.getById = async (req, res) => {
+  try {
+    const { businessId } = req.tenant;
+    const product = await knex('products as p')
+      .join('categories as c', 'p.category_id', 'c.id')
+      .select('p.*', 'c.name as category_name')
+      .where({ 'p.id': req.params.id, 'p.business_id': businessId })
+      .first();
+
+    if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
+    res.json(product);
+  } catch (err) {
+    console.error('Error al obtener producto:', err);
+    res.status(500).json({ error: 'Error al obtener producto' });
+  }
+};
+
+exports.create = async (req, res) => {
+  try {
+    const { businessId } = req.tenant;
+    const { name, price, tax_rate, tax_included, category_id, description, image_url, branch_id } = req.body;
+
+    if (!name || price === undefined || price === null || !category_id) {
+      return res.status(400).json({ error: 'Nombre, precio y categoría son requeridos' });
+    }
+
+    const parsedCategoryId = parseInt(category_id, 10);
+    const category = await knex('categories')
+      .where({ id: parsedCategoryId, business_id: businessId })
+      .first();
+
+    if (!category) {
+      return res.status(400).json({ error: 'La categoría seleccionada no existe en tu negocio' });
+    }
+
+    const [product] = await knex('products').insert({
+      business_id: businessId,
+      branch_id: branch_id || null,
+      category_id: parsedCategoryId,
+      name,
+      description: description || null,
+      price: parseFloat(price),
+      tax_rate: (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) ? parseFloat(tax_rate) : 0.0,
+      tax_included: tax_included !== undefined ? Boolean(tax_included) : true,
+      image_url: image_url || null
+    }).returning('*');
+
+    res.status(201).json({ id: product.id, message: 'Producto creado exitosamente' });
+  } catch (err) {
+    console.error('Error al crear producto:', err);
+    res.status(500).json({ error: 'Error al crear el producto' });
+  }
+};
+
+exports.update = async (req, res) => {
+  try {
+    const { businessId } = req.tenant;
+    const { id } = req.params;
+
+    const existing = await knex('products')
+      .where({ id, business_id: businessId })
+      .first();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    const { name, price, tax_rate, tax_included, category_id, description, image_url } = req.body;
+
+    const updateData = {};
+
+    if (name !== undefined) updateData.name = name;
+    if (price !== undefined && price !== null && !isNaN(parseFloat(price))) {
+      updateData.price = parseFloat(price);
+    }
+    if (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) {
+      updateData.tax_rate = parseFloat(tax_rate);
+    }
+    if (tax_included !== undefined && tax_included !== null) {
+      updateData.tax_included = Boolean(tax_included);
+    }
+    if (category_id !== undefined && category_id !== null && !isNaN(parseInt(category_id, 10))) {
+      const cat = await knex('categories').where({ id: parseInt(category_id, 10), business_id: businessId }).first();
+      if (cat) updateData.category_id = cat.id;
+    }
+    if (description !== undefined) updateData.description = description || null;
+    if (image_url !== undefined) updateData.image_url = image_url || null;
+
+    updateData.updated_at = knex.fn.now();
+
+    await knex('products')
+      .where({ id, business_id: businessId })
+      .update(updateData);
+
+    res.json({ message: 'Producto actualizado exitosamente' });
+  } catch (err) {
+    console.error('Error al actualizar producto:', err);
+    res.status(500).json({ error: 'Error al actualizar el producto' });
+  }
+};
+
+exports.remove = async (req, res) => {
+  const { businessId } = req.tenant;
+  try {
+    await knex('products')
+      .where({ id: req.params.id, business_id: businessId })
+      .update({ is_available: false, updated_at: knex.fn.now() });
+    res.json({ message: 'Producto eliminado lógicamente' });
+  } catch (err) {
+    console.error('Error al eliminar producto:', err);
+    res.status(500).json({ error: 'Error al eliminar producto' });
+  }
 };

@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { runMigrations } = require('./database/migrations');
+const knex = require('./database/knex');
 const errorHandler = require('./middleware/errorHandler');
 
 // Rutas
@@ -23,6 +23,9 @@ const settingsRoutes = require('./routes/settings.routes');
 const uploadRoutes = require('./routes/upload.routes');
 const reportsRoutes = require('./routes/reports.routes');
 
+const businessesRoutes = require('./routes/businesses.routes');
+const branchesRoutes = require('./routes/branches.routes');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -38,7 +41,8 @@ require('./sockets/kitchen.socket')(io);
 
 // Middlewares
 app.use(helmet({
-  crossOriginResourcePolicy: false
+  crossOriginResourcePolicy: false,
+  contentSecurityPolicy: false
 }));
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
@@ -56,6 +60,8 @@ app.use(limiter);
 
 // Montar rutas
 app.use('/api/auth', authRoutes);
+app.use('/api/businesses', businessesRoutes);
+app.use('/api/branches', branchesRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/categories', categoriesRoutes);
 app.use('/api/products', productsRoutes);
@@ -68,19 +74,40 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/reports', reportsRoutes);
 
-// Manejador de errores
-app.use(errorHandler);
+// Manejador de errores para la API
+app.use('/api', errorHandler);
+
+// --- SPA: Servir el frontend (build de producción) ---
+const frontendDistPath = path.join(__dirname, '..', 'frontend', 'dist');
+app.use(express.static(frontendDistPath));
+
+// Catch-all: cualquier ruta que no sea /api/* devuelve el index.html del SPA
+// Esto permite que React Router maneje las rutas del lado del cliente
+app.get('*', (req, res) => {
+  res.sendFile(path.join(frontendDistPath, 'index.html'));
+});
 
 const PORT = process.env.PORT || 3001;
 
 (async () => {
   try {
-    await runMigrations();
-    console.log('Base de datos inicializada correctamente.');
+    // Ejecutar migraciones de Knex automáticamente
+    console.log('Ejecutando migraciones de base de datos...');
+    await knex.migrate.latest();
+    console.log('✅ Migraciones completadas.');
+
+    // Verificar si hay datos, si no, ejecutar seeds
+    const businessCount = await knex('businesses').count('id as count').first();
+    if (parseInt(businessCount.count) === 0) {
+      console.log('Base de datos vacía. Ejecutando seeds...');
+      await knex.seed.run();
+      console.log('✅ Seeds completados.');
+    }
 
     server.listen(PORT, () => {
-      console.log(`✅ Servidor POS iniciado y escuchando en el puerto ${PORT}`);
+      console.log(`✅ Servidor POS Multi-tenant iniciado en el puerto ${PORT}`);
       console.log(`   API: http://localhost:${PORT}/api`);
+      console.log(`   SPA: http://localhost:${PORT}`);
     });
   } catch (err) {
     console.error('❌ Error al inicializar la base de datos:', err);

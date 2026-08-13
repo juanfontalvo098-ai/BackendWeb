@@ -13,6 +13,9 @@ class DatabaseWrapper {
   constructor() {
     this._db = null;
     this._ready = false;
+    this._savePending = false;
+    this._debounceTimer = null;
+    this._closed = false;
   }
 
   // Inicialización asíncrona — se debe llamar antes de usar la DB
@@ -23,6 +26,7 @@ class DatabaseWrapper {
     if (fs.existsSync(dbPath)) {
       const buffer = fs.readFileSync(dbPath);
       this._db = new SQL.Database(buffer);
+      console.log(`Base de datos cargada desde: ${dbPath}`);
     } else {
       // Crear directorio si no existe
       const dir = path.dirname(dbPath);
@@ -30,21 +34,41 @@ class DatabaseWrapper {
         fs.mkdirSync(dir, { recursive: true });
       }
       this._db = new SQL.Database();
+      console.log('Nueva base de datos creada en memoria.');
     }
 
     // Habilitar llaves foráneas (WAL no aplica en sql.js)
     this._db.run('PRAGMA foreign_keys = ON');
     this._ready = true;
 
-    // Guardar automáticamente cada 30 segundos
-    this._saveInterval = setInterval(() => this._saveToDisk(), 30000);
+    // Guardar automáticamente cada 15 segundos como safety net
+    this._saveInterval = setInterval(() => this._saveToDiskImmediate(), 15000);
+
+    // Graceful shutdown: guardar al cerrar el proceso
+    this._setupGracefulShutdown();
 
     return this;
   }
 
-  // Guardar la base de datos al disco
-  _saveToDisk() {
-    if (!this._db) return;
+  // Configurar cierre limpio del proceso
+  _setupGracefulShutdown() {
+    const shutdown = (signal) => {
+      console.log(`\n🛑 Señal ${signal} recibida. Guardando base de datos...`);
+      this._saveToDiskImmediate();
+      console.log('✅ Base de datos guardada exitosamente. Cerrando...');
+      process.exit(0);
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('beforeExit', () => {
+      this._saveToDiskImmediate();
+    });
+  }
+
+  // Guardar la base de datos al disco inmediatamente
+  _saveToDiskImmediate() {
+    if (!this._db || this._closed) return;
     try {
       const data = this._db.export();
       const buffer = Buffer.from(data);
@@ -52,6 +76,19 @@ class DatabaseWrapper {
     } catch (err) {
       console.error('Error guardando base de datos:', err.message);
     }
+  }
+
+  // Guardar con debounce (100ms) — agrupa escrituras rápidas consecutivas
+  _saveToDisk() {
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+    }
+    this._savePending = true;
+    this._debounceTimer = setTimeout(() => {
+      this._saveToDiskImmediate();
+      this._savePending = false;
+      this._debounceTimer = null;
+    }, 100);
   }
 
   // Ejecutar SQL sin retorno (CREATE TABLE, múltiples sentencias, etc.)
@@ -97,8 +134,13 @@ class DatabaseWrapper {
 
   // Cerrar la base de datos y guardar
   close() {
+    if (this._closed) return;
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+    }
     if (this._saveInterval) clearInterval(this._saveInterval);
-    this._saveToDisk();
+    this._saveToDiskImmediate();
+    this._closed = true;
     if (this._db) this._db.close();
   }
 }
@@ -167,6 +209,9 @@ class StatementWrapper {
 
       const lastInsertRowid = lastIdResult.length > 0 ? lastIdResult[0].values[0][0] : 0;
       const changes = changesResult.length > 0 ? changesResult[0].values[0][0] : 0;
+
+      // Persistir cambios a disco después de cada escritura
+      this._dbWrapper._saveToDisk();
 
       return { changes, lastInsertRowid };
     } catch (err) {

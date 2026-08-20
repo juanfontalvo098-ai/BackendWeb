@@ -9,8 +9,8 @@ router.use(auth);
 router.use(tenantMiddleware);
 
 router.get('/', categoriesController.getAll);
-router.post('/', rbac('admin', 'gerente'), categoriesController.create);
-router.put('/:id', rbac('admin', 'gerente'), categoriesController.update);
-router.delete('/:id', rbac('admin', 'gerente'), categoriesController.remove);
+router.post('/', rbac('super_admin', 'admin', 'gerente'), categoriesController.create);
+router.put('/:id', rbac('super_admin', 'admin', 'gerente'), categoriesController.update);
+router.delete('/:id', rbac('super_admin', 'admin', 'gerente'), categoriesController.remove);
 
 module.exports = router;

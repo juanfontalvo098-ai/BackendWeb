@@ -5,9 +5,14 @@
 const knex = require('../database/knex');
 
 exports.open = async (req, res) => {
-  const { opening_amount } = req.body;
-  const { businessId, branchId } = req.tenant;
+  const opening_amount = parseFloat(req.body.opening_amount !== undefined ? req.body.opening_amount : (req.body.initial_amount !== undefined ? req.body.initial_amount : 0));
+  let { businessId, branchId } = req.tenant;
   const user_id = req.user.id;
+
+  if (!branchId) {
+    const defaultBranch = await knex('branches').where('business_id', businessId).first();
+    branchId = defaultBranch?.id;
+  }
 
   if (!branchId) return res.status(400).json({ error: 'Se requiere una sucursal activa' });
 
@@ -17,7 +22,7 @@ exports.open = async (req, res) => {
       .where({ branch_id: branchId, status: 'abierta' })
       .first();
 
-    if (current) return res.status(400).json({ error: 'Ya existe una caja abierta en esta sucursal' });
+    if (current) return res.status(400).json({ error: 'Ya existe una caja abierta en esta sucursal', register: current });
 
     const [register] = await knex('cash_registers').insert({
       business_id: businessId,
@@ -26,10 +31,15 @@ exports.open = async (req, res) => {
       opening_amount
     }).returning('*');
 
-    res.status(201).json({ id: register.id, message: 'Caja abierta exitosamente' });
+    if (req.app?.locals?.io) {
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'abierta', register });
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:opened', register);
+    }
+
+    res.status(201).json({ id: register.id, message: 'Caja abierta exitosamente', register });
   } catch (err) {
     console.error('Error al abrir caja:', err);
-    res.status(500).json({ error: 'Error al abrir caja' });
+    res.status(500).json({ error: 'Error al abrir caja: ' + err.message });
   }
 };
 
@@ -76,6 +86,11 @@ exports.addMovement = async (req, res) => {
       payment_method: payment_method || 'efectivo',
       description: description || null
     }).returning('*');
+
+    if (req.app?.locals?.io) {
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:movement-added', movement);
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'abierta', register });
+    }
 
     res.json({ id: movement.id, message: 'Movimiento registrado' });
   } catch (err) {
@@ -284,6 +299,11 @@ exports.close = async (req, res) => {
       console.error('Error al insertar shift_report:', e);
     }
 
+    if (req.app?.locals?.io) {
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'cerrada', register_id: register.id });
+      req.app.locals.io.to(`branch:${branchId}`).emit('cash:closed', { register_id: register.id });
+    }
+
     res.json({
       message: 'Caja cerrada y Reporte Z guardado exitosamente',
       expected,
@@ -312,7 +332,43 @@ exports.getReport = async (req, res) => {
       .groupBy('type', 'payment_method')
       .select('type', 'payment_method', knex.raw('SUM(amount) as total'));
 
-    res.json({ register, movements });
+    // Calcular ventas por método de pago para este turno
+    const invoices = await knex('invoices')
+      .where('cash_register_id', id)
+      .select('payment_method', 'total', 'tip_amount');
+
+    let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0, totalTips = 0;
+    invoices.forEach(inv => {
+      const tot = parseFloat(inv.total || 0);
+      totalTips += parseFloat(inv.tip_amount || 0);
+      if (inv.payment_method === 'efectivo' || !inv.payment_method) cashSales += tot;
+      else if (inv.payment_method === 'tarjeta') cardSales += tot;
+      else if (inv.payment_method === 'transferencia') transferSales += tot;
+      else if (inv.payment_method === 'credito') creditSales += tot;
+      else cashSales += tot;
+    });
+
+    let cashInflows = 0, cashOutflows = 0;
+    movements.forEach(m => {
+      const amt = parseFloat(m.total || 0);
+      if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
+      if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
+    });
+
+    const initialFloat = parseFloat(register.opening_amount || 0);
+    const expectedCash = initialFloat + cashSales + cashInflows - cashOutflows;
+
+    res.json({
+      register,
+      movements,
+      salesSummary: {
+        cashSales, cardSales, transferSales, creditSales, totalTips,
+        cashInflows, cashOutflows,
+        invoicesCount: invoices.length,
+        initialFloat,
+        expectedCash
+      }
+    });
   } catch (err) {
     console.error('Error al obtener reporte de caja:', err);
     res.status(500).json({ error: 'Error al obtener reporte de caja' });

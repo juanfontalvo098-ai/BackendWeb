@@ -1,19 +1,29 @@
-/**
- * Invoices Controller — Multi-tenant
- * Facturación filtrada por branch_id con número de factura que incluye código de sucursal
- */
 const knex = require('../database/knex');
+const { deductStockForInvoice } = require('./inventory.controller');
 
 exports.getAll = async (req, res) => {
   try {
     const { businessId, branchId, isGlobalScope } = req.tenant;
 
     let query = knex('invoices as i')
-      .join('users as u_cashier', 'i.user_id', 'u_cashier.id')
-      .join('orders as o', 'i.order_id', 'o.id')
-      .join('users as u_waiter', 'o.user_id', 'u_waiter.id')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .select('i.*', 'u_cashier.full_name as cashier_name', 'u_waiter.full_name as waiter_name', 't.table_number')
+      .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+      .leftJoin('orders as o', 'i.order_id', 'o.id')
+      .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .select(
+        'i.*',
+        'u_cashier.full_name as cashier_name',
+        'u_waiter.full_name as waiter_name',
+        't.table_number',
+        'c.name as customer_name',
+        'c.document_type as customer_doc_type',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.city as customer_city',
+        'c.email as customer_email'
+      )
       .where('i.business_id', businessId);
 
     if (branchId && !isGlobalScope) {
@@ -41,11 +51,24 @@ exports.getById = async (req, res) => {
     const { businessId } = req.tenant;
 
     const invoice = await knex('invoices as i')
-      .join('users as u_cashier', 'i.user_id', 'u_cashier.id')
-      .join('orders as o', 'i.order_id', 'o.id')
-      .join('users as u_waiter', 'o.user_id', 'u_waiter.id')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .select('i.*', 'u_cashier.full_name as cashier_name', 'u_waiter.full_name as waiter_name', 't.table_number')
+      .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+      .leftJoin('orders as o', 'i.order_id', 'o.id')
+      .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .select(
+        'i.*',
+        'u_cashier.full_name as cashier_name',
+        'u_waiter.full_name as waiter_name',
+        't.table_number',
+        'c.name as customer_name',
+        'c.document_type as customer_doc_type',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.city as customer_city',
+        'c.email as customer_email'
+      )
       .where({ 'i.id': req.params.id, 'i.business_id': businessId })
       .first();
 
@@ -68,11 +91,24 @@ exports.getPrintFormat = async (req, res) => {
     const { businessId } = req.tenant;
 
     const invoice = await knex('invoices as i')
-      .join('users as u_cashier', 'i.user_id', 'u_cashier.id')
-      .join('orders as o', 'i.order_id', 'o.id')
-      .join('users as u_waiter', 'o.user_id', 'u_waiter.id')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .select('i.*', 'u_cashier.full_name as cashier_name', 'u_waiter.full_name as waiter_name', 't.table_number')
+      .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+      .leftJoin('orders as o', 'i.order_id', 'o.id')
+      .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .select(
+        'i.*',
+        'o.order_type',
+        'u_cashier.full_name as cashier_name',
+        'u_waiter.full_name as waiter_name',
+        't.table_number',
+        'c.name as customer_name',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.city as customer_city',
+        'c.email as customer_email'
+      )
       .where({ 'i.id': req.params.id, 'i.business_id': businessId })
       .first();
 
@@ -83,7 +119,19 @@ exports.getPrintFormat = async (req, res) => {
       .select('oi.*', 'p.name')
       .where('oi.order_id', invoice.order_id);
 
-    res.json({ ...invoice, items });
+    // Obtener configuración del negocio para impresión
+    let settings = null;
+    if (invoice.branch_id) {
+      settings = await knex('settings').where({ business_id: businessId, branch_id: invoice.branch_id }).first();
+    }
+    if (!settings) {
+      settings = await knex('settings').where({ business_id: businessId }).whereNull('branch_id').first();
+    }
+    if (!settings) {
+      settings = await knex('settings').where({ business_id: businessId }).first();
+    }
+
+    res.json({ ...invoice, items, settings });
   } catch (err) {
     console.error('Error al obtener formato de impresión:', err);
     res.status(500).json({ error: 'Error al consultar formato de impresión' });
@@ -91,7 +139,10 @@ exports.getPrintFormat = async (req, res) => {
 };
 
 exports.create = async (req, res) => {
-  const { order_id, tip_percentage, custom_tip_amount, payment_method } = req.body;
+  const {
+    order_id, tip_percentage, custom_tip_amount,
+    payment_method, customer_id, discount_amount, notes
+  } = req.body;
   const { businessId, branchId } = req.tenant;
   const user_id = req.user.id;
 
@@ -101,6 +152,10 @@ exports.create = async (req, res) => {
       .first()
       || await knex('cash_registers')
         .where({ status: 'abierta', branch_id: branchId })
+        .orderBy('id', 'desc')
+        .first()
+        || await knex('cash_registers')
+        .where({ status: 'abierta', business_id: businessId })
         .orderBy('id', 'desc')
         .first();
 
@@ -113,7 +168,7 @@ exports.create = async (req, res) => {
     if (order.status === 'cerrada') return res.status(400).json({ error: 'La orden ya está cerrada' });
 
     const items = await knex('order_items')
-      .select('quantity', 'unit_price', 'tax_rate', 'tax_included')
+      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included')
       .where('order_id', order_id);
     if (items.length === 0) return res.status(400).json({ error: 'La orden no tiene ítems' });
 
@@ -134,23 +189,67 @@ exports.create = async (req, res) => {
       }
     });
 
-    const total_before_tip = subtotal + tax_total;
+    const parsedDiscount = parseFloat(discount_amount || order.discount_amount || 0);
+    const parsedDeliveryFee = parseFloat(req.body.delivery_fee !== undefined ? req.body.delivery_fee : (order.delivery_fee || 0));
+    const subtotalAfterDiscount = Math.max(0, subtotal - parsedDiscount);
+    const total_before_tip = subtotalAfterDiscount + tax_total;
 
     let tip_amount = 0;
-    if (custom_tip_amount !== undefined && custom_tip_amount !== null && parseFloat(custom_tip_amount) >= 0) {
+    if (payment_method === 'credito') {
+      tip_amount = 0;
+    } else if (custom_tip_amount !== undefined && custom_tip_amount !== null && parseFloat(custom_tip_amount) >= 0) {
       tip_amount = parseFloat(custom_tip_amount);
     } else {
       tip_amount = total_before_tip * (tip_percentage || 0);
     }
 
-    const total = total_before_tip + tip_amount;
+    const net_mandatory_total = total_before_tip + parsedDeliveryFee;
+    const total = net_mandatory_total + tip_amount;
+    const finalCustomerId = customer_id || order.customer_id || null;
 
-    // Generar número de factura con código de sucursal
-    const branch = await knex('branches').where('id', branchId).first();
-    const branchCode = branch ? branch.code.replace(/-/g, '') : 'GEN';
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const randStr = Math.floor(1000 + Math.random() * 9000);
-    const invoice_number = `POS-${branchCode}-${dateStr}-${randStr}`;
+    const parsedAmountPaid = req.body.amount_paid !== undefined ? Math.max(0, parseFloat(req.body.amount_paid)) : (payment_method === 'credito' ? 0 : total);
+    const parsedCreditAmount = req.body.credit_amount !== undefined ? Math.max(0, parseFloat(req.body.credit_amount)) : (payment_method === 'credito' ? net_mandatory_total : 0);
+    const parsedCreditDueDate = req.body.credit_due_date || null;
+
+    // Generar número de factura único, secuencial y exclusivo por negocio/sucursal
+    let settings = await knex('settings')
+      .where({ business_id: businessId, branch_id: branchId })
+      .first();
+    if (!settings) {
+      settings = await knex('settings')
+        .where({ business_id: businessId })
+        .whereNull('branch_id')
+        .first();
+    }
+
+    const business = await knex('businesses').where({ id: businessId }).first();
+
+    // Prefijo configurable o derivado del negocio
+    let prefix = 'FAC';
+    if (settings && settings.invoice_prefix && settings.invoice_prefix.trim()) {
+      prefix = settings.invoice_prefix.trim().toUpperCase();
+    } else if (business && business.slug) {
+      const cleanSlug = business.slug.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+      prefix = cleanSlug.length <= 4 ? cleanSlug : cleanSlug.substring(0, 4);
+    }
+
+    const branches = await knex('branches').where({ business_id: businessId });
+    const isMultiBranch = Array.isArray(branches) && branches.length > 1;
+    const branchPrefix = isMultiBranch ? `B${branchId}-` : '';
+
+    const invCountRes = await knex('invoices')
+      .where({ business_id: businessId, branch_id: branchId })
+      .count('id as total');
+    let seq = (invCountRes && invCountRes[0] ? parseInt(invCountRes[0].total, 10) : 0) + 1;
+    let invoice_number = `${prefix}-${branchPrefix}${String(seq).padStart(4, '0')}`;
+
+    // Validar colisión para garantizar unicidad estricta por negocio
+    let existingInv = await knex('invoices').where({ business_id: businessId, invoice_number }).first();
+    while (existingInv) {
+      seq++;
+      invoice_number = `${prefix}-${branchPrefix}${String(seq).padStart(4, '0')}`;
+      existingInv = await knex('invoices').where({ business_id: businessId, invoice_number }).first();
+    }
 
     const invoiceId = await knex.transaction(async (trx) => {
       const [invoiceInfo] = await trx('invoices').insert({
@@ -159,41 +258,215 @@ exports.create = async (req, res) => {
         order_id,
         cash_register_id: register.id,
         user_id,
-        subtotal,
+        customer_id: finalCustomerId,
+        subtotal: subtotalAfterDiscount,
         tax_total,
         tip_percentage: tip_percentage || 0,
         tip_amount,
+        discount_amount: parsedDiscount,
+        delivery_fee: parsedDeliveryFee,
         total,
-        payment_method,
-        invoice_number
-      }).returning('id');
+        payment_method: parsedCreditAmount > 0 && parsedAmountPaid > 0 ? `${payment_method} + crédito` : payment_method,
+        invoice_number,
+        notes: notes || null
+      }).returning('*');
 
-      await trx('cash_movements').insert({
-        cash_register_id: register.id,
-        type: 'venta',
-        amount: total,
-        payment_method,
-        description: `Factura ${invoice_number}`
+      // 1. Movimiento de caja si hubo abono/pago inmediato en efectivo/tarjeta/transferencia
+      if (parsedAmountPaid > 0 && payment_method !== 'credito') {
+        await trx('cash_movements').insert({
+          cash_register_id: register.id,
+          type: 'venta',
+          amount: parsedAmountPaid,
+          payment_method,
+          description: `Factura ${invoice_number} ${parsedCreditAmount > 0 ? '(Abono parcial + saldo a crédito)' : (order.order_type === 'delivery' ? '(Domicilio)' : '')}`
+        });
+      }
+
+      // 2. Si hay saldo a crédito (total o parcial), registrar en Cartera de Clientes (CxC)
+      if (parsedCreditAmount > 0 && finalCustomerId) {
+        let dueDateStr = parsedCreditDueDate;
+        if (!dueDateStr) {
+          const dueDate = new Date();
+          dueDate.setDate(dueDate.getDate() + 30); // 30 días default
+          dueDateStr = dueDate.toISOString().slice(0, 10);
+        }
+
+        await trx('accounts_receivable').insert({
+          business_id: businessId,
+          branch_id: branchId,
+          customer_id: finalCustomerId,
+          invoice_id: invoiceInfo.id,
+          amount: parsedCreditAmount,
+          paid_amount: 0,
+          balance: parsedCreditAmount,
+          due_date: dueDateStr,
+          status: 'pendiente',
+          notes: `Crédito por factura ${invoice_number}${parsedAmountPaid > 0 ? ` (Abonado: $${parsedAmountPaid})` : ''}`
+        });
+
+        // Aumentar saldo de deuda utilizado del cliente
+        await trx('customers')
+          .where('id', finalCustomerId)
+          .increment('credit_balance', parsedCreditAmount);
+      } else if (payment_method === 'credito' && finalCustomerId) {
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + 30);
+        await trx('accounts_receivable').insert({
+          business_id: businessId,
+          branch_id: branchId,
+          customer_id: finalCustomerId,
+          invoice_id: invoiceInfo.id,
+          amount: total,
+          paid_amount: 0,
+          balance: total,
+          due_date: dueDate.toISOString().slice(0, 10),
+          status: 'pendiente',
+          notes: `Crédito por factura ${invoice_number}`
+        });
+
+        await trx('customers')
+          .where('id', finalCustomerId)
+          .increment('credit_balance', total);
+      }
+
+      // 3. Fidelización: Puntos de cliente (1 punto por cada $1000)
+      if (finalCustomerId && total > 0) {
+        const earnedPoints = Math.floor(total / 1000);
+        if (earnedPoints > 0) {
+          await trx('customers')
+            .where('id', finalCustomerId)
+            .increment('loyalty_points', earnedPoints);
+        }
+      }
+
+      // 3. Descontar inventario automáticamente
+      try {
+        await deductStockForInvoice(trx, businessId, branchId, items, user_id);
+      } catch (invErr) {
+        console.warn('Advertencia al descontar inventario:', invErr.message);
+      }
+
+      // 4. Actualizar estado de orden (si hay saldo a crédito pendiente queda 'pendiente_pago', si se pagó completa 'cerrada')
+      const targetOrderStatus = parsedCreditAmount > 0 ? 'pendiente_pago' : 'cerrada';
+      await trx('orders').where('id', order_id).update({
+        status: targetOrderStatus,
+        customer_id: finalCustomerId,
+        delivery_fee: parsedDeliveryFee,
+        updated_at: trx.fn.now()
       });
 
-      await trx('orders').where('id', order_id).update({ status: 'cerrada', updated_at: knex.fn.now() });
-      await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
+      if (order.table_id) {
+        await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
+      }
 
-      return invoiceInfo.id;
+      await trx('delivery_assignments').where('order_id', order_id).update({
+        status: 'entregado',
+        delivered_at: trx.fn.now()
+      });
+
+      // 5. Generar asiento contable automático si existe plan de cuentas
+      try {
+        const coaCount = await trx('chart_of_accounts').where('business_id', businessId).count('id as count').first();
+        if (parseInt(coaCount.count) > 0) {
+          const cajaAccount = await trx('chart_of_accounts').where({ business_id: businessId, code: '1.1.01' }).first();
+          const cxcAccount = await trx('chart_of_accounts').where({ business_id: businessId, code: '1.1.03' }).first();
+          const ventasAccount = await trx('chart_of_accounts').where({ business_id: businessId, code: '4.1.01' }).first();
+          const ivaAccount = await trx('chart_of_accounts').where({ business_id: businessId, code: '2.1.02' }).first();
+          const deliveryIncomeAccount = await trx('chart_of_accounts').where({ business_id: businessId, code: '4.1.03' }).first();
+
+          const debitAccount = payment_method === 'credito' ? (cxcAccount || cajaAccount) : (cajaAccount || cxcAccount);
+
+          if (debitAccount && ventasAccount) {
+            const count = await trx('journal_entries').where('business_id', businessId).count('id as c').first();
+            const entryNum = `AD-${String(parseInt(count.c) + 1).padStart(6, '0')}`;
+
+            const [jEntry] = await trx('journal_entries').insert({
+              business_id: businessId,
+              branch_id: branchId,
+              entry_number: entryNum,
+              entry_date: new Date().toISOString().slice(0, 10),
+              description: `Venta Factura ${invoice_number}`,
+              reference_type: 'invoice',
+              reference_id: invoiceInfo.id,
+              status: 'aprobado',
+              user_id
+            }).returning('*');
+
+            // Débito a Caja o CxC
+            await trx('journal_entry_lines').insert({
+              journal_entry_id: jEntry.id,
+              account_id: debitAccount.id,
+              debit: total,
+              credit: 0,
+              description: `Cobro Factura ${invoice_number}`
+            });
+
+            // Crédito a Ingresos por Ventas de Productos
+            await trx('journal_entry_lines').insert({
+              journal_entry_id: jEntry.id,
+              account_id: ventasAccount.id,
+              debit: 0,
+              credit: subtotalAfterDiscount,
+              description: `Ingreso por Ventas de Productos`
+            });
+
+            // Crédito a IVA por Pagar
+            if (tax_total > 0 && ivaAccount) {
+              await trx('journal_entry_lines').insert({
+                journal_entry_id: jEntry.id,
+                account_id: ivaAccount.id,
+                debit: 0,
+                credit: tax_total,
+                description: `IVA Facturado`
+              });
+            }
+
+            // Crédito a Ingresos por Domicilios
+            if (parsedDeliveryFee > 0 && (deliveryIncomeAccount || ventasAccount)) {
+              await trx('journal_entry_lines').insert({
+                journal_entry_id: jEntry.id,
+                account_id: (deliveryIncomeAccount || ventasAccount).id,
+                debit: 0,
+                credit: parsedDeliveryFee,
+                description: `Ingreso por Servicio de Domicilio`
+              });
+            }
+          }
+        }
+      } catch (accErr) {
+        console.warn('Advertencia al generar asiento contable:', accErr.message);
+      }
+
+      const targetId = invoiceInfo && typeof invoiceInfo === 'object' ? (invoiceInfo.id || invoiceInfo) : invoiceInfo;
+      return targetId;
     });
 
     if (req.app.locals.io) {
-      req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
+      if (order.table_id) {
+        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
+      }
       req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id });
     }
 
     // Obtener factura completa para retornar
     const invoice = await knex('invoices as i')
-      .join('users as u_cashier', 'i.user_id', 'u_cashier.id')
-      .join('orders as o', 'i.order_id', 'o.id')
-      .join('users as u_waiter', 'o.user_id', 'u_waiter.id')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .select('i.*', 'u_cashier.full_name as cashier_name', 'u_waiter.full_name as waiter_name', 't.table_number')
+      .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+      .leftJoin('orders as o', 'i.order_id', 'o.id')
+      .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .select(
+        'i.*',
+        'u_cashier.full_name as cashier_name',
+        'u_waiter.full_name as waiter_name',
+        't.table_number',
+        'c.name as customer_name',
+        'c.document_type as customer_doc_type',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.email as customer_email'
+      )
       .where('i.id', invoiceId)
       .first();
 
@@ -202,7 +475,13 @@ exports.create = async (req, res) => {
       .select('oi.*', 'p.name')
       .where('oi.order_id', order_id);
 
-    res.status(201).json({ ...invoice, items: invoiceItems });
+    const fullInvoice = { ...invoice, items: invoiceItems };
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${branchId}`).emit('invoice:created', fullInvoice);
+    }
+
+    res.status(201).json(fullInvoice);
   } catch (err) {
     console.error('Error al generar factura:', err);
     res.status(500).json({ error: 'Error al generar factura', details: err.message });
@@ -224,6 +503,11 @@ exports.remove = async (req, res) => {
       await trx('cash_movements')
         .where('cash_register_id', invoice.cash_register_id)
         .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
+        .del();
+
+      // Si tenía CxC, eliminarla
+      await trx('accounts_receivable')
+        .where({ invoice_id: id })
         .del();
 
       await trx('orders').where('id', invoice.order_id).update({

@@ -26,6 +26,19 @@ const reportsRoutes = require('./routes/reports.routes');
 const businessesRoutes = require('./routes/businesses.routes');
 const branchesRoutes = require('./routes/branches.routes');
 
+// ERP Routes
+const customersRoutes = require('./routes/customers.routes');
+const suppliersRoutes = require('./routes/suppliers.routes');
+const inventoryRoutes = require('./routes/inventory.routes');
+const discountsRoutes = require('./routes/discounts.routes');
+const deliveryRoutes = require('./routes/delivery.routes');
+const accountingRoutes = require('./routes/accounting.routes');
+const hrRoutes = require('./routes/hr.routes');
+const suppliesRoutes = require('./routes/supplies.routes');
+const supplyCategoriesRoutes = require('./routes/supplyCategories.routes');
+const electronicInvoiceRoutes = require('./routes/electronicInvoice.routes');
+const advancedReportsRoutes = require('./routes/advancedReports.routes');
+
 const app = express();
 const server = http.createServer(app);
 
@@ -58,6 +71,16 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    system: 'GastrosPOS ERP'
+  });
+});
+
 // Montar rutas
 app.use('/api/auth', authRoutes);
 app.use('/api/businesses', businessesRoutes);
@@ -68,11 +91,25 @@ app.use('/api/products', productsRoutes);
 app.use('/api/tables', tablesRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/cash', cashRegisterRoutes);
+app.use('/api/cash-register', cashRegisterRoutes);
 app.use('/api/invoices', invoicesRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/reports', reportsRoutes);
+
+// Montar rutas ERP
+app.use('/api/customers', customersRoutes);
+app.use('/api/suppliers', suppliersRoutes);
+app.use('/api/supplies', suppliesRoutes);
+app.use('/api/supply-categories', supplyCategoriesRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/discounts', discountsRoutes);
+app.use('/api/delivery', deliveryRoutes);
+app.use('/api/accounting', accountingRoutes);
+app.use('/api/hr', hrRoutes);
+app.use('/api/electronic-invoice', electronicInvoiceRoutes);
+app.use('/api/advanced-reports', advancedReportsRoutes);
 
 // Manejador de errores para la API
 app.use('/api', errorHandler);

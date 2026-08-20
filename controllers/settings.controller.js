@@ -71,7 +71,18 @@ exports.updateSettings = async (req, res) => {
       phone: phone || '',
       receipt_footer: receipt_footer || '¡Gracias por su compra!',
       logo_url: logo_url || '',
-      default_paper_width: default_paper_width || '80mm'
+      default_paper_width: default_paper_width || '80mm',
+      tax_regime: req.body.tax_regime || 'impoconsumo',
+      print_tax_regime: req.body.print_tax_regime !== undefined ? (req.body.print_tax_regime === true || req.body.print_tax_regime === 1 || req.body.print_tax_regime === 'true') : true,
+      custom_tax_regime_text: req.body.custom_tax_regime_text || '',
+      economic_activity_code: req.body.economic_activity_code || '',
+      invoice_prefix: req.body.invoice_prefix ? req.body.invoice_prefix.trim().toUpperCase() : 'FAC',
+      enable_silent_printing: req.body.enable_silent_printing !== undefined ? !!req.body.enable_silent_printing : false,
+      auto_print_kitchen_tickets: req.body.auto_print_kitchen_tickets !== undefined ? !!req.body.auto_print_kitchen_tickets : true,
+      auto_print_invoices: req.body.auto_print_invoices !== undefined ? !!req.body.auto_print_invoices : false,
+      silent_print_bridge_url: req.body.silent_print_bridge_url || 'http://localhost:8088',
+      printer_kitchen_name: req.body.printer_kitchen_name || '',
+      printer_receipt_name: req.body.printer_receipt_name || ''
     };
 
     if (existing) {

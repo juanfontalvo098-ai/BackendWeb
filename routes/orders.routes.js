@@ -12,6 +12,7 @@ router.get('/', ordersController.getAll);
 router.get('/:id', ordersController.getById);
 
 router.post('/', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.create);
+router.put('/:id', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.updateOrder);
 router.post('/:id/items', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.addItems);
 router.delete('/:id/items/:itemId', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.removeItem);
 router.put('/:id/items/:itemId/quantity', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.updateItemQuantity);

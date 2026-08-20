@@ -51,7 +51,11 @@ exports.getById = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const { businessId } = req.tenant;
-    const { name, price, tax_rate, tax_included, category_id, description, image_url, branch_id } = req.body;
+    const {
+      name, price, cost_price, barcode, sku, unit_of_measure,
+      track_inventory, min_stock, tax_rate, tax_included, category_id,
+      description, image_url, branch_id
+    } = req.body;
 
     if (!name || price === undefined || price === null || !category_id) {
       return res.status(400).json({ error: 'Nombre, precio y categoría son requeridos' });
@@ -73,12 +77,33 @@ exports.create = async (req, res) => {
       name,
       description: description || null,
       price: parseFloat(price),
+      cost_price: (cost_price !== undefined && cost_price !== null && !isNaN(parseFloat(cost_price))) ? parseFloat(cost_price) : 0,
+      barcode: barcode || null,
+      sku: sku || null,
+      unit_of_measure: unit_of_measure || 'unidad',
+      track_inventory: track_inventory !== undefined ? Boolean(track_inventory) : false,
+      min_stock: (min_stock !== undefined && min_stock !== null && !isNaN(parseInt(min_stock, 10))) ? parseInt(min_stock, 10) : 0,
       tax_rate: (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) ? parseFloat(tax_rate) : 0.0,
       tax_included: tax_included !== undefined ? Boolean(tax_included) : true,
       image_url: image_url || null
     }).returning('*');
 
-    res.status(201).json({ id: product.id, message: 'Producto creado exitosamente' });
+    // Si track_inventory es true y hay sucursal activa, inicializar registro de inventario en 0
+    if (product.track_inventory && req.tenant.branchId) {
+      const existingInv = await knex('inventory')
+        .where({ branch_id: req.tenant.branchId, product_id: product.id })
+        .first();
+      if (!existingInv) {
+        await knex('inventory').insert({
+          business_id: businessId,
+          branch_id: req.tenant.branchId,
+          product_id: product.id,
+          quantity: 0
+        });
+      }
+    }
+
+    res.status(201).json({ id: product.id, message: 'Producto creado exitosamente', product });
   } catch (err) {
     console.error('Error al crear producto:', err);
     res.status(500).json({ error: 'Error al crear el producto' });
@@ -98,13 +123,27 @@ exports.update = async (req, res) => {
       return res.status(404).json({ error: 'Producto no encontrado' });
     }
 
-    const { name, price, tax_rate, tax_included, category_id, description, image_url } = req.body;
+    const {
+      name, price, cost_price, barcode, sku, unit_of_measure,
+      track_inventory, min_stock, tax_rate, tax_included,
+      category_id, description, image_url
+    } = req.body;
 
     const updateData = {};
 
     if (name !== undefined) updateData.name = name;
     if (price !== undefined && price !== null && !isNaN(parseFloat(price))) {
       updateData.price = parseFloat(price);
+    }
+    if (cost_price !== undefined && cost_price !== null && !isNaN(parseFloat(cost_price))) {
+      updateData.cost_price = parseFloat(cost_price);
+    }
+    if (barcode !== undefined) updateData.barcode = barcode || null;
+    if (sku !== undefined) updateData.sku = sku || null;
+    if (unit_of_measure !== undefined) updateData.unit_of_measure = unit_of_measure;
+    if (track_inventory !== undefined) updateData.track_inventory = Boolean(track_inventory);
+    if (min_stock !== undefined && min_stock !== null && !isNaN(parseInt(min_stock, 10))) {
+      updateData.min_stock = parseInt(min_stock, 10);
     }
     if (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) {
       updateData.tax_rate = parseFloat(tax_rate);

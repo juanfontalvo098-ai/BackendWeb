@@ -7,12 +7,41 @@ const knex = require('../database/knex');
 exports.getAll = async (req, res) => {
   try {
     const { businessId, branchId, isGlobalScope } = req.tenant;
-    const { status, table_id } = req.query;
+    const { status, table_id, order_type, customer_id, shift_id, cash_shift_id } = req.query;
 
     let query = knex('orders as o')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .join('users as u', 'o.user_id', 'u.id')
-      .select('o.*', 't.table_number', 'u.full_name as waiter_name')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('users as u', 'o.user_id', 'u.id')
+      .leftJoin('customers as c', 'o.customer_id', 'c.id')
+      .leftJoin('invoices as inv', 'o.id', 'inv.order_id')
+      .leftJoin('cash_registers as cr', knex.raw('COALESCE(o.cash_register_id, inv.cash_register_id)'), 'cr.id')
+      .leftJoin('accounts_receivable as ar', 'inv.id', 'ar.invoice_id')
+      .select(
+        'o.*',
+        knex.raw('COALESCE(o.cash_register_id, inv.cash_register_id) as cash_shift_id'),
+        'cr.status as shift_status',
+        't.table_number',
+        'u.full_name as waiter_name',
+        'c.name as customer_name',
+        'c.document_type as customer_doc_type',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.email as customer_email',
+        'inv.id as invoice_id',
+        'inv.invoice_number',
+        'inv.total as invoice_total',
+        'inv.tip_amount as invoice_tip_amount',
+        'inv.tip_percentage as invoice_tip_percentage',
+        'inv.payment_method as invoice_payment_method',
+        'inv.created_at as invoice_created_at',
+        'ar.id as credit_ar_id',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
+      )
       .where('o.business_id', businessId);
 
     if (branchId && !isGlobalScope) {
@@ -21,17 +50,49 @@ exports.getAll = async (req, res) => {
 
     if (status) query.andWhere('o.status', status);
     if (table_id) query.andWhere('o.table_id', table_id);
+    if (order_type) query.andWhere('o.order_type', order_type);
+    if (customer_id) query.andWhere('o.customer_id', customer_id);
+    
+    const filterShiftId = shift_id || cash_shift_id;
+    if (filterShiftId) {
+      query.where(knex.raw('COALESCE(o.cash_register_id, inv.cash_register_id)'), filterShiftId);
+    }
 
     query.orderBy('o.id', 'desc');
 
     const orders = await query;
 
-    // Cargar ítems de cada orden
+    // Cargar ítems y calcular totales de cada orden
     for (const order of orders) {
       order.items = await knex('order_items as oi')
         .join('products as p', 'oi.product_id', 'p.id')
-        .select('oi.*', 'p.name')
+        .select('oi.*', 'p.name', 'p.image_url')
         .where('oi.order_id', order.id);
+
+      let itemsTotal = 0;
+      let taxTotal = 0;
+      (order.items || []).forEach(it => {
+        const lineTotal = (parseFloat(it.quantity) || 1) * (parseFloat(it.unit_price) || 0);
+        itemsTotal += lineTotal;
+        const rate = parseFloat(it.tax_rate || 0);
+        if (rate > 0) {
+          if (it.tax_included) {
+            const sub = lineTotal / (1 + rate);
+            taxTotal += (lineTotal - sub);
+          } else {
+            taxTotal += (lineTotal * rate);
+          }
+        }
+      });
+
+      const disc = parseFloat(order.discount_amount || 0);
+      const deliveryFee = parseFloat(order.delivery_fee || 0);
+      const computedSubtotal = Math.max(0, itemsTotal - disc);
+      order.items_subtotal = itemsTotal;
+      order.computed_total = computedSubtotal + deliveryFee;
+      order.final_total = order.invoice_total !== null && order.invoice_total !== undefined
+        ? parseFloat(order.invoice_total)
+        : (order.computed_total + (parseFloat(order.invoice_tip_amount) || 0));
     }
 
     res.json(orders);
@@ -46,9 +107,35 @@ exports.getById = async (req, res) => {
     const { businessId } = req.tenant;
 
     const order = await knex('orders as o')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
-      .join('users as u', 'o.user_id', 'u.id')
-      .select('o.*', 't.table_number', 'u.full_name as waiter_name')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('users as u', 'o.user_id', 'u.id')
+      .leftJoin('customers as c', 'o.customer_id', 'c.id')
+      .leftJoin('invoices as inv', 'o.id', 'inv.order_id')
+      .leftJoin('accounts_receivable as ar', 'inv.id', 'ar.invoice_id')
+      .select(
+        'o.*',
+        't.table_number',
+        'u.full_name as waiter_name',
+        'c.name as customer_name',
+        'c.document_type as customer_doc_type',
+        'c.document_number as customer_document',
+        'c.phone as customer_phone',
+        'c.address as customer_address',
+        'c.email as customer_email',
+        'inv.id as invoice_id',
+        'inv.invoice_number',
+        'inv.total as invoice_total',
+        'inv.tip_amount as invoice_tip_amount',
+        'inv.tip_percentage as invoice_tip_percentage',
+        'inv.payment_method as invoice_payment_method',
+        'inv.created_at as invoice_created_at',
+        'ar.id as credit_ar_id',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
+      )
       .where({ 'o.id': req.params.id, 'o.business_id': businessId })
       .first();
 
@@ -56,8 +143,20 @@ exports.getById = async (req, res) => {
 
     order.items = await knex('order_items as oi')
       .join('products as p', 'oi.product_id', 'p.id')
-      .select('oi.*', 'p.name')
+      .select('oi.*', 'p.name', 'p.image_url')
       .where('oi.order_id', order.id);
+
+    let itemsTotal = 0;
+    (order.items || []).forEach(it => {
+      itemsTotal += (parseFloat(it.quantity) || 1) * (parseFloat(it.unit_price) || 0);
+    });
+    const disc = parseFloat(order.discount_amount || 0);
+    const deliveryFee = parseFloat(order.delivery_fee || 0);
+    order.items_subtotal = itemsTotal;
+    order.computed_total = Math.max(0, itemsTotal - disc) + deliveryFee;
+    order.final_total = order.invoice_total !== null && order.invoice_total !== undefined
+      ? parseFloat(order.invoice_total)
+      : (order.computed_total + (parseFloat(order.invoice_tip_amount) || 0));
 
     res.json(order);
   } catch (err) {
@@ -67,38 +166,169 @@ exports.getById = async (req, res) => {
 };
 
 exports.create = async (req, res) => {
-  const { table_id, guests, notes } = req.body;
+  const {
+    table_id, guests, notes, order_type, customer_id,
+    delivery_address, delivery_phone, delivery_notes,
+    discount_amount, discount_type, delivery_fee,
+    delivery_zone_id, delivery_driver_id
+  } = req.body;
   const { businessId, branchId } = req.tenant;
   const user_id = req.user.id;
 
   if (!branchId) return res.status(400).json({ error: 'Se requiere una sucursal activa' });
 
   try {
-    const table = await knex('tables_restaurant')
-      .where({ id: table_id, business_id: businessId })
-      .first();
-    if (!table) return res.status(404).json({ error: 'Mesa no encontrada' });
+    const isMesaOrder = order_type === 'mesa' || (!order_type && table_id);
 
-    const existingOrder = await knex('orders')
-      .where('table_id', table_id)
-      .whereIn('status', ['abierta', 'en_preparacion', 'lista', 'pendiente_pago'])
+    if (isMesaOrder && table_id) {
+      const table = await knex('tables_restaurant')
+        .where({ id: table_id, business_id: businessId })
+        .first();
+      if (!table) return res.status(404).json({ error: 'Mesa no encontrada' });
+
+      // Verificación interna silenciosa de orden activa existente en la mesa
+      const existingOrder = await knex('orders')
+        .where('table_id', table_id)
+        .whereNotIn('status', ['cerrada', 'cancelada'])
+        .orderBy('id', 'desc')
+        .first();
+
+      if (existingOrder) {
+        // Si ya hay una orden activa en la mesa, adjuntar los ítems sin crear comanda duplicada
+        if (Array.isArray(req.body.items) && req.body.items.length > 0) {
+          const newItemsList = [];
+          for (const item of req.body.items) {
+            const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
+            if (prod) {
+              const [inserted] = await knex('order_items').insert({
+                order_id: existingOrder.id,
+                product_id: prod.id,
+                quantity: parseInt(item.quantity, 10) || 1,
+                unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+                tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
+                tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+                status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
+                notes: item.notes || null,
+                sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
+              }).returning('*');
+              newItemsList.push({ name: prod.name, quantity: inserted.quantity, notes: inserted.notes });
+            }
+          }
+
+          if (req.body.send_to_kitchen && newItemsList.length > 0) {
+            const tableDisplay = table.table_number || `Mesa ${table_id}`;
+            await knex('kitchen_tickets').insert({
+              business_id: businessId,
+              branch_id: branchId,
+              order_id: existingOrder.id,
+              table_number: tableDisplay,
+              items_json: JSON.stringify(newItemsList)
+            });
+            await knex('orders').where('id', existingOrder.id).update({ status: 'en_preparacion' });
+          }
+
+          if (req.app && req.app.locals && req.app.locals.io) {
+            req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: existingOrder.id });
+            if (req.body.send_to_kitchen) {
+              const tableDisplay = table.table_number || `Mesa ${table_id}`;
+              req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
+                order_id: existingOrder.id, table_number: tableDisplay
+              });
+            }
+          }
+        }
+
+        await knex('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
+        return res.status(200).json({ id: existingOrder.id, message: 'Ítems incorporados a la orden activa de la mesa', order: existingOrder });
+      }
+    }
+
+    const finalOrderType = order_type || (table_id ? 'mesa' : 'para_llevar');
+
+    // Asociar al turno de caja abierto actual
+    const activeShift = await knex('cash_registers')
+      .where({ branch_id: branchId, status: 'abierta' })
       .orderBy('id', 'desc')
       .first();
-
-    if (existingOrder) {
-      return res.status(200).json({ id: existingOrder.id, message: 'Orden existente recuperada' });
-    }
 
     const [newOrder] = await knex('orders').insert({
       business_id: businessId,
       branch_id: branchId,
-      table_id,
+      table_id: table_id || null,
+      cash_register_id: activeShift ? activeShift.id : null,
       user_id,
       guests: guests || 1,
-      notes: notes || null
+      notes: notes || null,
+      order_type: finalOrderType,
+      customer_id: customer_id || null,
+      delivery_address: delivery_address || null,
+      delivery_phone: delivery_phone || null,
+      delivery_notes: delivery_notes || null,
+      delivery_fee: (delivery_fee !== undefined && delivery_fee !== null) ? parseFloat(delivery_fee) : 0,
+      discount_amount: (discount_amount !== undefined && discount_amount !== null) ? parseFloat(discount_amount) : 0,
+      discount_type: discount_type || null
     }).returning('*');
 
-    res.status(201).json({ id: newOrder.id, message: 'Orden creada exitosamente' });
+    if (table_id) {
+      await knex('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
+    }
+
+    if (Array.isArray(req.body.items) && req.body.items.length > 0) {
+      const newItemsList = [];
+      for (const item of req.body.items) {
+        const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
+        if (prod) {
+          const [inserted] = await knex('order_items').insert({
+            order_id: newOrder.id,
+            product_id: prod.id,
+            quantity: parseInt(item.quantity, 10) || 1,
+            unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+            tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
+            tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+            status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
+            notes: item.notes || null,
+            sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
+          }).returning('*');
+          newItemsList.push({ name: prod.name, quantity: inserted.quantity, notes: inserted.notes });
+        }
+      }
+
+      // Crear ticket de comanda para cocina si se indicó
+      if (req.body.send_to_kitchen && newItemsList.length > 0) {
+        const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+        await knex('kitchen_tickets').insert({
+          business_id: businessId,
+          branch_id: branchId,
+          order_id: newOrder.id,
+          table_number: tableDisplay,
+          items_json: JSON.stringify(newItemsList)
+        });
+        await knex('orders').where('id', newOrder.id).update({ status: 'en_preparacion' });
+      }
+    }
+
+    // Si es domicilio y se pasó conductor/zona, crear asignación de delivery
+    if (finalOrderType === 'delivery') {
+      if (delivery_driver_id) {
+        await knex('delivery_assignments').insert({
+          business_id: businessId,
+          order_id: newOrder.id,
+          driver_user_id: parseInt(delivery_driver_id, 10),
+          delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
+          status: 'asignado'
+        });
+      }
+    }
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${branchId}`).emit('order:created', { order_id: newOrder.id });
+      const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+      req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
+        order_id: newOrder.id, table_number: tableDisplay
+      });
+    }
+
+    res.status(201).json({ id: newOrder.id, message: 'Orden creada exitosamente', order: newOrder });
   } catch (err) {
     console.error('Error al crear orden:', err);
     res.status(500).json({ error: 'Error al crear la orden' });
@@ -130,10 +360,6 @@ exports.addItems = async (req, res) => {
           ? parseFloat(item.unit_price)
           : parseFloat(product.price);
 
-        if (priceToUse < parseFloat(product.price)) {
-          throw new Error(`El precio de "${product.name}" no puede ser menor a su precio base ($${product.price}).`);
-        }
-
         await trx('order_items').insert({
           order_id: id,
           product_id: item.product_id,
@@ -146,18 +372,152 @@ exports.addItems = async (req, res) => {
       }
 
       await trx('orders').where('id', id).update({ updated_at: knex.fn.now() });
-      await trx('tables_restaurant').where('id', order.table_id).update({ status: 'ocupada' });
+      if (order.table_id) {
+        await trx('tables_restaurant').where('id', order.table_id).update({ status: 'ocupada' });
+      }
     });
 
-    if (req.app.locals.io) {
+    if (req.app && req.app.locals && req.app.locals.io) {
       const branchId = order.branch_id;
       req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
-      req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'ocupada' });
+      if (order.table_id) {
+        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'ocupada' });
+      }
     }
 
     res.json({ message: 'Ítems agregados a la orden' });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Error al agregar ítems' });
+  }
+};
+
+exports.updateOrder = async (req, res) => {
+  const { id } = req.params;
+  const {
+    customer_id,
+    order_type,
+    table_id,
+    guests,
+    notes,
+    delivery_address,
+    delivery_phone,
+    delivery_notes,
+    delivery_fee,
+    discount_amount,
+    discount_type,
+    items,
+    send_to_kitchen
+  } = req.body;
+  const { businessId } = req.tenant;
+
+  try {
+    const order = await knex('orders')
+      .where({ id, business_id: businessId })
+      .first();
+
+    if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
+    if (order.status === 'cerrada') return res.status(400).json({ error: 'No se puede modificar una orden que ya está cerrada y facturada' });
+    if (order.status === 'cancelada') return res.status(400).json({ error: 'No se puede modificar una orden cancelada' });
+
+    await knex.transaction(async (trx) => {
+      const updateData = { updated_at: trx.fn.now() };
+      if (customer_id !== undefined) updateData.customer_id = customer_id || null;
+      if (order_type !== undefined) updateData.order_type = order_type;
+      if (table_id !== undefined) updateData.table_id = table_id || null;
+      if (guests !== undefined) updateData.guests = parseInt(guests, 10) || 1;
+      if (notes !== undefined) updateData.notes = notes || null;
+      if (delivery_address !== undefined) updateData.delivery_address = delivery_address || null;
+      if (delivery_phone !== undefined) updateData.delivery_phone = delivery_phone || null;
+      if (delivery_notes !== undefined) updateData.delivery_notes = delivery_notes || null;
+      if (delivery_fee !== undefined) updateData.delivery_fee = parseFloat(delivery_fee) || 0;
+      if (discount_amount !== undefined) updateData.discount_amount = parseFloat(discount_amount) || 0;
+      if (discount_type !== undefined) updateData.discount_type = discount_type || null;
+
+      await trx('orders').where('id', id).update(updateData);
+
+      // Si se envían ítems completos
+      if (Array.isArray(items)) {
+        const existingItems = await trx('order_items').where('order_id', id);
+        const incomingItemIds = items.filter(it => it.id).map(it => it.id);
+
+        // 1. Eliminar ítems que ya no están
+        for (const existing of existingItems) {
+          if (!incomingItemIds.includes(existing.id)) {
+            await trx('order_items').where('id', existing.id).del();
+          }
+        }
+
+        // 2. Actualizar o insertar ítems
+        const newlyAddedItems = [];
+        for (const item of items) {
+          if (item.id) {
+            // Actualizar existente
+            await trx('order_items').where('id', item.id).update({
+              quantity: parseInt(item.quantity, 10) || 1,
+              unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : undefined,
+              notes: item.notes || null
+            });
+          } else if (item.product_id) {
+            // Insertar nuevo ítem
+            const prod = await trx('products').where('id', item.product_id).first();
+            if (prod) {
+              const [inserted] = await trx('order_items').insert({
+                order_id: id,
+                product_id: prod.id,
+                quantity: parseInt(item.quantity, 10) || 1,
+                unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+                tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
+                tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+                status: 'pendiente',
+                notes: item.notes || null
+              }).returning('*');
+              newlyAddedItems.push({ ...inserted, name: prod.name });
+            }
+          }
+        }
+
+        // Si se pidió enviar a cocina y hay nuevos ítems
+        if (send_to_kitchen && newlyAddedItems.length > 0) {
+          const itemsJson = newlyAddedItems.map(i => ({ name: i.name, quantity: i.quantity, notes: i.notes }));
+          const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+          await trx('kitchen_tickets').insert({
+            business_id: businessId,
+            branch_id: order.branch_id,
+            order_id: id,
+            table_number: tableDisplay,
+            items_json: JSON.stringify(itemsJson)
+          });
+          await trx('order_items')
+            .whereIn('id', newlyAddedItems.map(i => i.id))
+            .update({ status: 'enviado_cocina', sent_to_kitchen_at: trx.fn.now() });
+          await trx('orders').where('id', id).update({ status: 'en_preparacion' });
+        }
+      }
+    });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
+    }
+
+    const updatedOrder = await knex('orders as o')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('users as u', 'o.user_id', 'u.id')
+      .leftJoin('customers as c', 'o.customer_id', 'c.id')
+      .select('o.*', 't.table_number', 'u.full_name as waiter_name', 'c.name as customer_name', 'c.document_number as customer_document', 'c.phone as customer_phone')
+      .where({ 'o.id': id, 'o.business_id': businessId })
+      .first();
+
+    if (updatedOrder) {
+      updatedOrder.items = await knex('order_items as oi')
+        .join('products as p', 'oi.product_id', 'p.id')
+        .select('oi.*', 'p.name', 'p.image_url')
+        .where('oi.order_id', id);
+    }
+
+    res.json({ message: 'Orden actualizada exitosamente', order: updatedOrder });
+  } catch (err) {
+    console.error('Error al actualizar orden:', err);
+    res.status(500).json({ error: 'Error al actualizar orden', details: err.message });
   }
 };
 
@@ -177,9 +537,9 @@ exports.removeItem = async (req, res) => {
 
     const order = await knex('orders').where('id', item.order_id).first();
 
-    if (parseInt(remainingCount.count) === 0 && order && order.status === 'abierta') {
+    if (parseInt(remainingCount.count) === 0 && order && order.status === 'abierta' && order.table_id) {
       await knex('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
-      if (req.app.locals.io) {
+      if (req.app && req.app.locals && req.app.locals.io) {
         req.app.locals.io.to(`branch:${order.branch_id}`).emit('table:status-changed', {
           table_id: order.table_id, status: 'libre'
         });
@@ -214,7 +574,7 @@ exports.sendToKitchen = async (req, res) => {
 
   try {
     const order = await knex('orders as o')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .select('o.*', 't.table_number')
       .where({ 'o.id': id, 'o.business_id': businessId })
       .first();
@@ -231,13 +591,14 @@ exports.sendToKitchen = async (req, res) => {
     }
 
     const itemsJson = pendingItems.map(i => ({ name: i.name, quantity: i.quantity, notes: i.notes }));
+    const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
 
     await knex.transaction(async (trx) => {
       await trx('kitchen_tickets').insert({
         business_id: businessId,
         branch_id: order.branch_id,
         order_id: id,
-        table_number: order.table_number,
+        table_number: tableDisplay,
         items_json: JSON.stringify(itemsJson)
       });
 
@@ -246,17 +607,25 @@ exports.sendToKitchen = async (req, res) => {
         .update({ status: 'enviado_cocina', sent_to_kitchen_at: knex.fn.now() });
 
       await trx('orders').where('id', id).update({ status: 'en_preparacion', updated_at: knex.fn.now() });
-      await trx('tables_restaurant').where('id', order.table_id).update({ status: 'ocupada' });
+      if (order.table_id) {
+        await trx('tables_restaurant').where('id', order.table_id).update({ status: 'ocupada' });
+      }
     });
 
-    if (req.app.locals.io) {
+    if (req.app && req.app.locals && req.app.locals.io) {
       const branchId = order.branch_id;
       req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
-        order_id: id, table_number: order.table_number
+        order_id: id, 
+        table_number: tableDisplay,
+        items: itemsJson,
+        order_type: order.order_type,
+        created_at: new Date().toISOString()
       });
-      req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', {
-        table_id: order.table_id, status: 'ocupada'
-      });
+      if (order.table_id) {
+        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', {
+          table_id: order.table_id, status: 'ocupada'
+        });
+      }
       req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
     }
 
@@ -288,13 +657,17 @@ exports.cancelOrder = async (req, res) => {
       });
       await trx('order_items').where('order_id', id).del();
       await trx('kitchen_tickets').where('order_id', id).del();
-      await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
+      if (order.table_id) {
+        await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
+      }
     });
 
-    if (req.app.locals.io) {
-      req.app.locals.io.to(`branch:${order.branch_id}`).emit('table:status-changed', {
-        table_id: order.table_id, status: 'libre'
-      });
+    if (req.app && req.app.locals && req.app.locals.io) {
+      if (order.table_id) {
+        req.app.locals.io.to(`branch:${order.branch_id}`).emit('table:status-changed', {
+          table_id: order.table_id, status: 'libre'
+        });
+      }
       req.app.locals.io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
     }
 
@@ -322,8 +695,8 @@ exports.updateStatus = async (req, res) => {
 
       if (status === 'lista') {
         const orderData = await knex('orders as o')
-          .join('tables_restaurant as t', 'o.table_id', 't.id')
-          .select('o.id', 't.table_number')
+          .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+          .select('o.id', 'o.order_type', 't.table_number')
           .where('o.id', id)
           .first();
 
@@ -333,10 +706,11 @@ exports.updateStatus = async (req, res) => {
           .where('oi.order_id', id);
 
         const summary = items.map(i => `${i.quantity}x ${i.name}`).join(', ');
+        const tableLabel = orderData?.table_number ? `Mesa ${orderData.table_number}` : (orderData?.order_type || `#${id}`);
 
         req.app.locals.io.to(`branch:${order.branch_id}`).emit('kitchen:ticket-ready', {
           orderId: id,
-          table_number: orderData ? orderData.table_number : `#${id}`,
+          table_number: tableLabel,
           summary
         });
       }

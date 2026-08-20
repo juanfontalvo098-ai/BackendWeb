@@ -250,3 +250,113 @@ exports.exportShiftExcel = async (req, res) => {
     res.status(500).json({ error: 'Error al exportar reporte Excel' });
   }
 };
+
+/**
+ * Obtener desglose de insumos consumidos en el turno por productos vendidos
+ */
+exports.getShiftSuppliesUsage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { businessId } = req.tenant;
+
+    const shift = await knex('shift_reports')
+      .where('business_id', businessId)
+      .andWhere(function() {
+        this.where('id', id).orWhere('cash_register_id', id);
+      })
+      .first();
+
+    if (!shift) return res.status(404).json({ error: 'Informe de turno no encontrado' });
+
+    const cashRegisterId = shift.cash_register_id;
+
+    // Obtener todas las facturas y sus items de ese turno
+    const orderItems = await knex('order_items as oi')
+      .join('invoices as inv', 'oi.order_id', 'inv.order_id')
+      .join('products as p', 'oi.product_id', 'p.id')
+      .leftJoin('categories as c', 'p.category_id', 'c.id')
+      .select(
+        'oi.product_id',
+        'p.name as product_name',
+        'c.name as category_name',
+        knex.raw('SUM(oi.quantity)::float as total_units_sold'),
+        knex.raw('SUM(oi.quantity * oi.unit_price)::float as total_revenue')
+      )
+      .where('inv.cash_register_id', cashRegisterId)
+      .andWhere('inv.business_id', businessId)
+      .groupBy('oi.product_id', 'p.name', 'c.name');
+
+    // Mapear recetas e insumos
+    const suppliesMap = {};
+    let totalSuppliesCost = 0;
+
+    for (const item of orderItems) {
+      // Buscar receta del producto
+      const recipe = await knex('recipes')
+        .where({ product_id: item.product_id, business_id: businessId })
+        .first();
+
+      if (recipe) {
+        const recipeItems = await knex('recipe_items as ri')
+          .join('supplies as s', 'ri.supply_id', 's.id')
+          .select(
+            'ri.supply_id',
+            'ri.quantity as qty_per_unit',
+            's.name as supply_name',
+            's.unit_of_measure',
+            's.category as supply_category',
+            's.cost_price'
+          )
+          .where('ri.recipe_id', recipe.id);
+
+        recipeItems.forEach(ri => {
+          const supplyId = ri.supply_id;
+          const qtyPerUnit = parseFloat(ri.qty_per_unit || 0);
+          const totalQty = qtyPerUnit * item.total_units_sold;
+          const unitCost = parseFloat(ri.cost_price || 0);
+          const lineCost = totalQty * unitCost;
+
+          if (!suppliesMap[supplyId]) {
+            suppliesMap[supplyId] = {
+              supply_id: supplyId,
+              name: ri.supply_name,
+              category: ri.supply_category || 'General',
+              unit: ri.unit_of_measure,
+              cost_price: unitCost,
+              total_used: 0,
+              total_cost: 0,
+              used_in_products: []
+            };
+          }
+
+          suppliesMap[supplyId].total_used += totalQty;
+          suppliesMap[supplyId].total_cost += lineCost;
+          totalSuppliesCost += lineCost;
+
+          suppliesMap[supplyId].used_in_products.push({
+            product_name: item.product_name,
+            units_sold: item.total_units_sold,
+            qty_per_unit: qtyPerUnit,
+            consumed: totalQty
+          });
+        });
+      }
+    }
+
+    const suppliesList = Object.values(suppliesMap).sort((a, b) => b.total_cost - a.total_cost);
+
+    res.json({
+      shift_id: shift.id,
+      shift_name: shift.shift_name,
+      user_name: shift.user_name,
+      total_supplies_cost: totalSuppliesCost,
+      supplies_count: suppliesList.length,
+      supplies: suppliesList,
+      products_sold: orderItems
+    });
+  } catch (err) {
+    console.error('Error calculando insumos por turno:', err);
+    res.status(500).json({ error: 'Error al calcular insumos utilizados' });
+  }
+};
+

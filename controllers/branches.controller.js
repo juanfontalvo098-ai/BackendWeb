@@ -3,6 +3,33 @@
  */
 const knex = require('../database/knex');
 
+exports.getAll = async (req, res) => {
+  try {
+    const businessId = req.tenant?.businessId || req.user?.businessId;
+    let query = knex('branches').where('is_active', true);
+    if (businessId) {
+      query.andWhere('business_id', businessId);
+    }
+    const branches = await query.orderBy('name');
+    res.json(branches);
+  } catch (err) {
+    console.error('Error al obtener sucursales:', err);
+    res.status(500).json({ error: 'Error al consultar sucursales' });
+  }
+};
+
+exports.getById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const branch = await knex('branches').where('id', id).first();
+    if (!branch) return res.status(404).json({ error: 'Sucursal no encontrada' });
+    res.json(branch);
+  } catch (err) {
+    console.error('Error al obtener sucursal:', err);
+    res.status(500).json({ error: 'Error al consultar sucursal' });
+  }
+};
+
 exports.getByBusiness = async (req, res) => {
   const { businessId } = req.params;
   const { role, businessId: userBusinessId } = req.user;
@@ -13,7 +40,7 @@ exports.getByBusiness = async (req, res) => {
 
   try {
     const branches = await knex('branches')
-      .where({ business_id: businessId })
+      .where({ business_id: businessId, is_active: true })
       .orderBy('name');
     res.json(branches);
   } catch (err) {
@@ -27,7 +54,7 @@ exports.create = async (req, res) => {
   const { businessId: reqBusinessId } = req.params;
   const { role, businessId: userBusinessId } = req.user;
 
-  const targetBusinessId = reqBusinessId || userBusinessId;
+  const targetBusinessId = reqBusinessId || req.tenant?.businessId || userBusinessId;
 
   if (role !== 'super_admin' && targetBusinessId !== userBusinessId) {
     return res.status(403).json({ error: 'No tienes permisos para agregar sucursales a este negocio' });

@@ -15,8 +15,8 @@ function authorizeRoles(...allowedRoles) {
       return res.status(403).json({ error: 'No tienes permisos para realizar esta acción' });
     }
 
-    // super_admin siempre tiene acceso
-    if (req.user.role === 'super_admin') {
+    // super_admin y admin siempre tienen acceso total al negocio
+    if (req.user.role === 'super_admin' || req.user.role === 'admin') {
       return next();
     }
 

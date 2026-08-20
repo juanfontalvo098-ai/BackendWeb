@@ -38,6 +38,8 @@ const getConnectionConfig = () => {
   };
 };
 
+const path = require('path');
+
 module.exports = {
   development: {
     client: 'pg',
@@ -52,11 +54,11 @@ module.exports = {
       }
     },
     migrations: {
-      directory: './database/migrations',
+      directory: path.join(__dirname, 'database', 'migrations'),
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './database/seeds'
+      directory: path.join(__dirname, 'database', 'seeds')
     },
     searchPath: ['public']
   },
@@ -74,11 +76,11 @@ module.exports = {
       }
     },
     migrations: {
-      directory: './database/migrations',
+      directory: path.join(__dirname, 'database', 'migrations'),
       tableName: 'knex_migrations'
     },
     seeds: {
-      directory: './database/seeds'
+      directory: path.join(__dirname, 'database', 'seeds')
     },
     searchPath: ['public']
   }

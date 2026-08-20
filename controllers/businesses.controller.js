@@ -187,10 +187,117 @@ exports.deletePermanent = async (req, res) => {
   }
 
   try {
-    await knex('businesses').where('id', id).del();
-    res.json({ message: 'Negocio y todos sus datos asociados eliminados definitivamente' });
+    const business = await knex('businesses').where('id', id).first();
+    if (!business) {
+      return res.status(404).json({ error: 'Negocio no encontrado' });
+    }
+
+    await knex.transaction(async (trx) => {
+      // 1. Delivery assignments, tickets de cocina y líneas de orden
+      const orderIds = (await trx('orders').where('business_id', id).select('id')).map(o => o.id);
+      if (orderIds.length > 0) {
+        await trx('delivery_assignments').whereIn('order_id', orderIds).del();
+        await trx('kitchen_tickets').whereIn('order_id', orderIds).del();
+        await trx('order_items').whereIn('order_id', orderIds).del();
+      }
+
+      // 2. Facturas y cartera
+      await trx('credit_notes').where('business_id', id).del();
+      await trx('debit_notes').where('business_id', id).del();
+      await trx('accounts_receivable').where('business_id', id).del();
+      await trx('accounts_payable').where('business_id', id).del();
+      await trx('invoices').where('business_id', id).del();
+      await trx('orders').where('business_id', id).del();
+
+      // 3. Cajas y turnos
+      const crIds = (await trx('cash_registers').where('business_id', id).select('id')).map(c => c.id);
+      if (crIds.length > 0) {
+        await trx('cash_movements').whereIn('cash_register_id', crIds).del();
+      }
+      await trx('shift_reports').where('business_id', id).del();
+      await trx('cash_registers').where('business_id', id).del();
+
+      // 4. Contabilidad
+      const jeIds = (await trx('journal_entries').where('business_id', id).select('id')).map(j => j.id);
+      if (jeIds.length > 0) {
+        await trx('journal_entry_lines').whereIn('journal_entry_id', jeIds).del();
+      }
+      await trx('journal_entries').where('business_id', id).del();
+      await trx('chart_of_accounts').where('business_id', id).del();
+
+      // 5. Inventario, Insumos y Recetas
+      const recipeIds = (await trx('recipes').where('business_id', id).select('id')).map(r => r.id);
+      if (recipeIds.length > 0) {
+        await trx('recipe_items').whereIn('recipe_id', recipeIds).del();
+      }
+      await trx('recipes').where('business_id', id).del();
+      await trx('inventory_movements').where('business_id', id).del();
+      await trx('inventory').where('business_id', id).del();
+      await trx('supplies_movements').where('business_id', id).del();
+      await trx('supplies_inventory').where('business_id', id).del();
+
+      // 6. Conteos y Órdenes de Compra
+      const scIds = (await trx('stock_counts').where('business_id', id).select('id')).map(s => s.id);
+      if (scIds.length > 0) {
+        await trx('stock_count_items').whereIn('stock_count_id', scIds).del();
+      }
+      await trx('stock_counts').where('business_id', id).del();
+
+      const poIds = (await trx('purchase_orders').where('business_id', id).select('id')).map(p => p.id);
+      if (poIds.length > 0) {
+        await trx('purchase_order_items').whereIn('purchase_order_id', poIds).del();
+      }
+      await trx('purchase_orders').where('business_id', id).del();
+
+      // 7. Proveedores, Insumos y Categorías
+      const suppIds = (await trx('suppliers').where('business_id', id).select('id')).map(s => s.id);
+      if (suppIds.length > 0) {
+        await trx('supplier_products').whereIn('supplier_id', suppIds).del();
+      }
+      await trx('supplies').where('business_id', id).del();
+      await trx('supply_categories').where('business_id', id).del();
+      await trx('suppliers').where('business_id', id).del();
+      await trx('customers').where('business_id', id).del();
+
+      // 8. Descuentos y Listas de Precios
+      const discIds = (await trx('discounts').where('business_id', id).select('id')).map(d => d.id);
+      if (discIds.length > 0) {
+        await trx('coupons').whereIn('discount_id', discIds).del();
+      }
+      await trx('discounts').where('business_id', id).del();
+      
+      const plIds = (await trx('price_lists').where('business_id', id).select('id')).map(p => p.id);
+      if (plIds.length > 0) {
+        await trx('price_list_items').whereIn('price_list_id', plIds).del();
+      }
+      await trx('price_lists').where('business_id', id).del();
+
+      // 9. Productos y Categorías
+      await trx('products').where('business_id', id).del();
+      await trx('categories').where('business_id', id).del();
+
+      // 10. RRHH y Empleados
+      await trx('attendance').where('business_id', id).del();
+      await trx('leave_requests').where('business_id', id).del();
+      await trx('shifts_schedule').where('business_id', id).del();
+      await trx('payroll').where('business_id', id).del();
+      await trx('employees').where('business_id', id).del();
+
+      // 11. Restaurante y Configuración
+      await trx('tables_restaurant').where('business_id', id).del();
+      await trx('delivery_zones').where('business_id', id).del();
+      await trx('invoice_sequences').where('business_id', id).del();
+      await trx('settings').where('business_id', id).del();
+
+      // 12. Usuarios, Sucursales y Negocio
+      await trx('users').where('business_id', id).del();
+      await trx('branches').where('business_id', id).del();
+      await trx('businesses').where('id', id).del();
+    });
+
+    res.json({ message: `El negocio "${business.name}" y todos sus datos asociados fueron eliminados definitivamente` });
   } catch (err) {
     console.error('Error al eliminar negocio:', err);
-    res.status(500).json({ error: 'Error al eliminar el negocio de la base de datos' });
+    res.status(500).json({ error: 'Error al eliminar el negocio: ' + (err.message || 'Error de base de datos') });
   }
 };

@@ -979,6 +979,17 @@ exports.exportAccountingExcel = async (req, res) => {
     const { businessId } = req.tenant;
     const { start_date, end_date } = req.query;
 
+    const formatSafeDate = (d) => {
+      if (!d) return '---';
+      try {
+        const dateObj = new Date(d);
+        if (isNaN(dateObj.getTime())) return String(d).slice(0, 10);
+        return dateObj.toISOString().slice(0, 10);
+      } catch (e) {
+        return String(d || '---');
+      }
+    };
+
     const settings = await knex('settings')
       .where('business_id', businessId)
       .whereNull('branch_id')
@@ -1021,7 +1032,7 @@ exports.exportAccountingExcel = async (req, res) => {
       )
       .where('je.business_id', businessId);
 
-    if (start_date && end_date) {
+    if (start_date && end_date && start_date.trim() !== '' && end_date.trim() !== '' && start_date !== 'undefined' && end_date !== 'undefined') {
       journalQuery.whereRaw('DATE(je.entry_date) BETWEEN DATE(?) AND DATE(?)', [start_date, end_date]);
     }
 
@@ -1029,14 +1040,14 @@ exports.exportAccountingExcel = async (req, res) => {
 
     journalLines.forEach(line => {
       const row = sheetJournal.addRow({
-        entry_number: line.entry_number,
-        entry_date: new Date(line.entry_date).toISOString().slice(0, 10),
+        entry_number: line.entry_number || '---',
+        entry_date: formatSafeDate(line.entry_date),
         description: line.description || '',
-        account_code: line.account_code,
-        account_name: line.account_name,
+        account_code: line.account_code || '',
+        account_name: line.account_name || '',
         debit: parseFloat(line.debit || 0),
         credit: parseFloat(line.credit || 0),
-        status: line.status?.toUpperCase()
+        status: (line.status || 'asentado').toUpperCase()
       });
       row.getCell(6).numFmt = '"$"#,##0';
       row.getCell(7).numFmt = '"$"#,##0';
@@ -1061,7 +1072,7 @@ exports.exportAccountingExcel = async (req, res) => {
     });
 
     const arRows = await knex('accounts_receivable as ar')
-      .join('customers as c', 'ar.customer_id', 'c.id')
+      .leftJoin('customers as c', 'ar.customer_id', 'c.id')
       .leftJoin('invoices as inv', 'ar.invoice_id', 'inv.id')
       .select(
         'c.name as customer_name',
@@ -1078,14 +1089,14 @@ exports.exportAccountingExcel = async (req, res) => {
 
     arRows.forEach(ar => {
       const row = sheetAR.addRow({
-        customer_name: ar.customer_name,
+        customer_name: ar.customer_name || 'Cliente General',
         document_number: ar.document_number || '---',
         invoice_number: ar.invoice_number || '---',
         amount: parseFloat(ar.amount || 0),
         paid_amount: parseFloat(ar.paid_amount || 0),
         balance: parseFloat(ar.balance || 0),
-        due_date: new Date(ar.due_date).toISOString().slice(0, 10),
-        status: ar.status?.toUpperCase()
+        due_date: formatSafeDate(ar.due_date),
+        status: (ar.status || 'pendiente').toUpperCase()
       });
       [4, 5, 6].forEach(c => { row.getCell(c).numFmt = '"$"#,##0'; });
     });
@@ -1108,10 +1119,10 @@ exports.exportAccountingExcel = async (req, res) => {
     });
 
     const apRows = await knex('accounts_payable as ap')
-      .join('suppliers as s', 'ap.supplier_id', 's.id')
+      .leftJoin('suppliers as s', 'ap.supplier_id', 's.id')
       .select(
         's.name as supplier_name',
-        's.tax_id',
+        's.document_number as tax_id',
         'ap.amount',
         'ap.paid_amount',
         'ap.balance',
@@ -1123,19 +1134,19 @@ exports.exportAccountingExcel = async (req, res) => {
 
     apRows.forEach(ap => {
       const row = sheetAP.addRow({
-        supplier_name: ap.supplier_name,
+        supplier_name: ap.supplier_name || 'Proveedor General',
         tax_id: ap.tax_id || '---',
         amount: parseFloat(ap.amount || 0),
         paid_amount: parseFloat(ap.paid_amount || 0),
         balance: parseFloat(ap.balance || 0),
-        due_date: new Date(ap.due_date).toISOString().slice(0, 10),
-        status: ap.status?.toUpperCase()
+        due_date: formatSafeDate(ap.due_date),
+        status: (ap.status || 'pendiente').toUpperCase()
       });
       [3, 4, 5].forEach(c => { row.getCell(c).numFmt = '"$"#,##0'; });
     });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Contabilidad_${start_date || 'Periodo'}_al_${end_date || 'Hoy'}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename=Contabilidad_${start_date || 'General'}_al_${end_date || 'Hoy'}.xlsx`);
 
     await workbook.xlsx.write(res);
     res.end();

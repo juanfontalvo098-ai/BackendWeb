@@ -43,20 +43,30 @@ exports.open = async (req, res) => {
   }
 };
 
+const getOpenRegister = async (businessId, branchId, userId = null) => {
+  let query = knex('cash_registers')
+    .where('business_id', businessId)
+    .andWhereRaw("LOWER(status) = 'abierta'");
+
+  if (branchId) {
+    query.andWhere('branch_id', branchId);
+  }
+
+  if (userId) {
+    const userReg = await query.clone().where('user_id', userId).first();
+    if (userReg) return userReg;
+  }
+
+  return await query.orderBy('id', 'desc').first();
+};
+
 exports.getCurrent = async (req, res) => {
-  const { branchId } = req.tenant;
+  const { businessId, branchId } = req.tenant;
 
   try {
-    // Buscar caja abierta: primero la del usuario, luego cualquier abierta en la sucursal
-    const register = await knex('cash_registers')
-      .where({ user_id: req.user.id, status: 'abierta', branch_id: branchId })
-      .first()
-      || await knex('cash_registers')
-        .where({ status: 'abierta', branch_id: branchId })
-        .orderBy('id', 'desc')
-        .first();
+    const register = await getOpenRegister(businessId, branchId, req.user?.id);
 
-    if (!register) return res.status(404).json({ error: 'No hay caja abierta en esta sucursal' });
+    if (!register) return res.status(404).json({ error: 'No hay caja abierta en este negocio' });
     res.json(register);
   } catch (err) {
     console.error('Error al obtener caja actual:', err);
@@ -66,16 +76,10 @@ exports.getCurrent = async (req, res) => {
 
 exports.addMovement = async (req, res) => {
   const { type, amount, payment_method, description } = req.body;
-  const { branchId } = req.tenant;
+  const { businessId, branchId } = req.tenant;
 
   try {
-    const register = await knex('cash_registers')
-      .where({ user_id: req.user.id, status: 'abierta', branch_id: branchId })
-      .first()
-      || await knex('cash_registers')
-        .where({ status: 'abierta', branch_id: branchId })
-        .orderBy('id', 'desc')
-        .first();
+    const register = await getOpenRegister(businessId, branchId, req.user?.id);
 
     if (!register) return res.status(400).json({ error: 'Debes abrir una caja primero' });
 
@@ -100,16 +104,10 @@ exports.addMovement = async (req, res) => {
 };
 
 exports.getShiftSummary = async (req, res) => {
-  const { branchId } = req.tenant;
+  const { businessId, branchId } = req.tenant;
 
   try {
-    const register = await knex('cash_registers')
-      .where({ user_id: req.user.id, status: 'abierta', branch_id: branchId })
-      .first()
-      || await knex('cash_registers')
-        .where({ status: 'abierta', branch_id: branchId })
-        .orderBy('id', 'desc')
-        .first();
+    const register = await getOpenRegister(businessId, branchId, req.user?.id);
 
     if (!register) return res.status(404).json({ error: 'No hay caja abierta' });
 
@@ -145,7 +143,10 @@ exports.getShiftSummary = async (req, res) => {
     const auditRow = await knex('orders as o')
       .leftJoin('order_items as oi', 'o.id', 'oi.order_id')
       .where('o.status', 'cancelada')
-      .andWhere('o.branch_id', branchId)
+      .andWhere(function() {
+        this.where('o.business_id', businessId);
+        if (branchId) this.andWhere('o.branch_id', branchId);
+      })
       .andWhereRaw("DATE(o.updated_at) = CURRENT_DATE")
       .select(
         knex.raw('COALESCE(COUNT(DISTINCT o.id), 0) as canceled_orders_count'),
@@ -181,13 +182,7 @@ exports.close = async (req, res) => {
   const { businessId, branchId } = req.tenant;
 
   try {
-    const register = await knex('cash_registers')
-      .where({ user_id: req.user.id, status: 'abierta', branch_id: branchId })
-      .first()
-      || await knex('cash_registers')
-        .where({ status: 'abierta', branch_id: branchId })
-        .orderBy('id', 'desc')
-        .first();
+    const register = await getOpenRegister(businessId, branchId, req.user?.id);
 
     if (!register) return res.status(400).json({ error: 'No tienes una caja abierta' });
 

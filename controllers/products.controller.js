@@ -183,3 +183,177 @@ exports.remove = async (req, res) => {
     res.status(500).json({ error: 'Error al eliminar producto' });
   }
 };
+
+exports.importJson = async (req, res) => {
+  const { businessId, branchId } = req.tenant;
+  const { data, update_existing = true } = req.body;
+
+  if (!data) {
+    return res.status(400).json({ error: 'No se enviaron datos JSON para importar' });
+  }
+
+  let categoriesInput = [];
+  let productsInput = [];
+
+  if (Array.isArray(data)) {
+    // Es una lista directa de productos
+    productsInput = data;
+  } else if (typeof data === 'object') {
+    // Es un objeto estructurado { categories: [...], products: [...] }
+    if (Array.isArray(data.categories)) categoriesInput = data.categories;
+    if (Array.isArray(data.products)) productsInput = data.products;
+    else if (Array.isArray(data.items)) productsInput = data.items;
+  }
+
+  if (categoriesInput.length === 0 && productsInput.length === 0) {
+    return res.status(400).json({ error: 'El archivo JSON no contiene productos ni categorías válidos' });
+  }
+
+  try {
+    const result = await knex.transaction(async (trx) => {
+      // 1. Obtener todas las categorías existentes del negocio en memoria
+      const existingCategories = await trx('categories')
+        .where('business_id', businessId)
+        .where('is_active', true);
+      
+      const categoryMap = new Map();
+      existingCategories.forEach(c => {
+        categoryMap.set(c.name.trim().toLowerCase(), c);
+      });
+
+      let categoriesCreated = 0;
+
+      // 2. Procesar categorías explícitas si vienen en el JSON
+      for (const cat of categoriesInput) {
+        if (!cat.name || !cat.name.trim()) continue;
+        const normName = cat.name.trim().toLowerCase();
+        if (!categoryMap.has(normName)) {
+          const [newCat] = await trx('categories').insert({
+            business_id: businessId,
+            branch_id: branchId || null,
+            name: cat.name.trim(),
+            description: cat.description || null,
+            sort_order: cat.sort_order !== undefined ? parseInt(cat.sort_order, 10) : existingCategories.length + categoriesCreated
+          }).returning('*');
+          categoryMap.set(normName, newCat);
+          categoriesCreated++;
+        }
+      }
+
+      // 3. Procesar productos
+      let productsCreated = 0;
+      let productsUpdated = 0;
+      const errors = [];
+
+      for (let i = 0; i < productsInput.length; i++) {
+        const item = productsInput[i];
+        if (!item.name || !item.name.trim()) {
+          errors.push(`Fila ${i + 1}: El nombre del producto es obligatorio`);
+          continue;
+        }
+
+        const price = parseFloat(item.price);
+        if (isNaN(price) || price < 0) {
+          errors.push(`Producto "${item.name}": El precio debe ser un número válido >= 0`);
+          continue;
+        }
+
+        // Resolver categoría
+        const catNameRaw = (item.category_name || item.category || item.categoria || 'General').toString().trim();
+        const normCatName = catNameRaw.toLowerCase();
+        let targetCategory = categoryMap.get(normCatName);
+
+        if (!targetCategory) {
+          // Crear categoría implícita automáticamente
+          const [newCat] = await trx('categories').insert({
+            business_id: businessId,
+            branch_id: branchId || null,
+            name: catNameRaw,
+            description: `Categoría generada automáticamente al importar ${catNameRaw}`,
+            sort_order: existingCategories.length + categoriesCreated
+          }).returning('*');
+          targetCategory = newCat;
+          categoryMap.set(normCatName, newCat);
+          categoriesCreated++;
+        }
+
+        const productData = {
+          business_id: businessId,
+          branch_id: branchId || null,
+          category_id: targetCategory.id,
+          name: item.name.trim(),
+          description: item.description || null,
+          price: price,
+          cost_price: (item.cost_price !== undefined && !isNaN(parseFloat(item.cost_price))) ? parseFloat(item.cost_price) : 0,
+          sku: item.sku ? item.sku.toString().trim() : null,
+          barcode: item.barcode ? item.barcode.toString().trim() : null,
+          unit_of_measure: item.unit_of_measure || item.unit || 'unidad',
+          track_inventory: item.track_inventory !== undefined ? Boolean(item.track_inventory) : false,
+          min_stock: (item.min_stock !== undefined && !isNaN(parseInt(item.min_stock, 10))) ? parseInt(item.min_stock, 10) : 0,
+          tax_rate: (item.tax_rate !== undefined && !isNaN(parseFloat(item.tax_rate))) ? parseFloat(item.tax_rate) : 0.0,
+          tax_included: item.tax_included !== undefined ? Boolean(item.tax_included) : true,
+          image_url: item.image_url || null,
+          is_available: item.is_available !== undefined ? Boolean(item.is_available) : true,
+          updated_at: trx.fn.now()
+        };
+
+        // Buscar si ya existe por SKU o por Nombre + Categoría
+        let existingProd = null;
+        if (productData.sku) {
+          existingProd = await trx('products')
+            .where({ business_id: businessId, sku: productData.sku })
+            .first();
+        }
+        if (!existingProd) {
+          existingProd = await trx('products')
+            .where({ business_id: businessId, category_id: targetCategory.id })
+            .whereRaw('LOWER(name) = ?', [productData.name.toLowerCase()])
+            .first();
+        }
+
+        if (existingProd && update_existing) {
+          await trx('products').where('id', existingProd.id).update(productData);
+          productsUpdated++;
+        } else if (!existingProd) {
+          const [inserted] = await trx('products').insert(productData).returning('*');
+          productsCreated++;
+
+          if (inserted.track_inventory && branchId) {
+            const initStock = item.initial_stock !== undefined ? parseFloat(item.initial_stock) : 0;
+            const existingInv = await trx('inventory')
+              .where({ branch_id: branchId, product_id: inserted.id })
+              .first();
+            if (!existingInv) {
+              await trx('inventory').insert({
+                business_id: businessId,
+                branch_id: branchId,
+                product_id: inserted.id,
+                current_stock: initStock,
+                min_stock: inserted.min_stock,
+                max_stock: 1000,
+                avg_cost: inserted.cost_price,
+                last_cost: inserted.cost_price
+              });
+            }
+          }
+        }
+      }
+
+      return {
+        categoriesCreated,
+        productsCreated,
+        productsUpdated,
+        totalProcessed: productsInput.length,
+        errors
+      };
+    });
+
+    res.json({
+      message: `Importación completada: ${result.productsCreated} productos creados, ${result.productsUpdated} actualizados, ${result.categoriesCreated} nuevas categorías.`,
+      ...result
+    });
+  } catch (err) {
+    console.error('Error al importar productos JSON:', err);
+    res.status(500).json({ error: 'Error al importar catálogo desde JSON: ' + (err.message || 'Error interno') });
+  }
+};

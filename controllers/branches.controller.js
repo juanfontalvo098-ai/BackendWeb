@@ -162,17 +162,87 @@ exports.remove = async (req, res) => {
 
 exports.deletePermanent = async (req, res) => {
   const { id } = req.params;
-  const { role } = req.user;
-
-  if (role !== 'super_admin') {
-    return res.status(403).json({ error: 'Solo el Super Administrador puede eliminar sucursales definitivamente' });
-  }
+  const { role, businessId: userBusinessId } = req.user;
 
   try {
-    await knex('branches').where('id', id).del();
-    res.json({ message: 'Sucursal eliminada definitivamente' });
+    const branch = await knex('branches').where('id', id).first();
+    if (!branch) return res.status(404).json({ error: 'Sucursal no encontrada' });
+
+    if (role !== 'super_admin' && branch.business_id !== userBusinessId) {
+      return res.status(403).json({ error: 'No tienes permisos para eliminar esta sucursal' });
+    }
+
+    // Verificar si es la única sucursal del negocio
+    const totalBranches = await knex('branches')
+      .where({ business_id: branch.business_id })
+      .count('id as count')
+      .first();
+
+    if (parseInt(totalBranches.count, 10) <= 1 && role !== 'super_admin') {
+      return res.status(400).json({ error: 'No puedes eliminar la única sucursal de tu negocio' });
+    }
+
+    await knex.transaction(async (trx) => {
+      // 1. Delivery y comandas de la sucursal
+      const orderIds = (await trx('orders').where('branch_id', id).select('id')).map(o => o.id);
+      if (orderIds.length > 0) {
+        await trx('delivery_assignments').whereIn('order_id', orderIds).del().catch(() => {});
+        await trx('kitchen_tickets').whereIn('order_id', orderIds).del().catch(() => {});
+        await trx('order_items').whereIn('order_id', orderIds).del().catch(() => {});
+      }
+
+      // 2. Facturas y órdenes
+      await trx('credit_notes').where('branch_id', id).del().catch(() => {});
+      await trx('debit_notes').where('branch_id', id).del().catch(() => {});
+      await trx('accounts_receivable').where('branch_id', id).del().catch(() => {});
+      await trx('accounts_payable').where('branch_id', id).del().catch(() => {});
+      await trx('invoices').where('branch_id', id).del().catch(() => {});
+      await trx('orders').where('branch_id', id).del().catch(() => {});
+
+      // 3. Cajas y turnos
+      const crIds = (await trx('cash_registers').where('branch_id', id).select('id')).map(c => c.id);
+      if (crIds.length > 0) {
+        await trx('cash_movements').whereIn('cash_register_id', crIds).del().catch(() => {});
+      }
+      await trx('shift_reports').where('branch_id', id).del().catch(() => {});
+      await trx('cash_registers').where('branch_id', id).del().catch(() => {});
+
+      // 4. Inventario de la sucursal
+      await trx('inventory_movements').where('branch_id', id).del().catch(() => {});
+      await trx('inventory').where('branch_id', id).del().catch(() => {});
+      await trx('supplies_movements').where('branch_id', id).del().catch(() => {});
+      await trx('supplies_inventory').where('branch_id', id).del().catch(() => {});
+
+      // 5. Conteos y compras
+      const scIds = (await trx('stock_counts').where('branch_id', id).select('id')).map(s => s.id);
+      if (scIds.length > 0) {
+        await trx('stock_count_items').whereIn('stock_count_id', scIds).del().catch(() => {});
+      }
+      await trx('stock_counts').where('branch_id', id).del().catch(() => {});
+
+      const poIds = (await trx('purchase_orders').where('branch_id', id).select('id')).map(p => p.id);
+      if (poIds.length > 0) {
+        await trx('purchase_order_items').whereIn('purchase_order_id', poIds).del().catch(() => {});
+      }
+      await trx('purchase_orders').where('branch_id', id).del().catch(() => {});
+
+      // 6. Mesas y configuración de sucursal
+      await trx('tables_restaurant').where('branch_id', id).del().catch(() => {});
+      await trx('settings').where('branch_id', id).del().catch(() => {});
+      await trx('attendance').where('branch_id', id).del().catch(() => {});
+      await trx('shifts_schedule').where('branch_id', id).del().catch(() => {});
+
+      // 7. Reasignar usuarios y empleados de esa sucursal a branch_id = null
+      await trx('users').where('branch_id', id).update({ branch_id: null }).catch(() => {});
+      await trx('employees').where('branch_id', id).update({ branch_id: null }).catch(() => {});
+
+      // 8. Eliminar sucursal
+      await trx('branches').where('id', id).del();
+    });
+
+    res.json({ message: `Sucursal "${branch.name}" eliminada definitivamente` });
   } catch (err) {
     console.error('Error al eliminar sucursal:', err);
-    res.status(500).json({ error: 'Error al eliminar sucursal de la base de datos' });
+    res.status(500).json({ error: 'Error al eliminar sucursal: ' + (err.message || 'Error de base de datos') });
   }
 };

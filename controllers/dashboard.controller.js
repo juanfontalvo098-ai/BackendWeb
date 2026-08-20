@@ -258,12 +258,11 @@ exports.getMetrics = async (req, res) => {
     try {
       let shiftQuery = knex('cash_registers as cr')
         .leftJoin('users as u', 'cr.user_id', 'u.id')
-        .whereRaw("LOWER(cr.status) = 'abierta'");
+        .whereRaw("LOWER(cr.status) = 'abierta'")
+        .where('cr.business_id', businessId);
 
       if (branchId && !isGlobalScope) {
         shiftQuery.andWhere('cr.branch_id', branchId);
-      } else if (businessId) {
-        shiftQuery.andWhere('cr.business_id', businessId);
       }
 
       const openRegister = await shiftQuery

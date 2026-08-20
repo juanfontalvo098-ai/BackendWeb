@@ -11,6 +11,7 @@ router.use(tenantMiddleware);
 router.get('/', productsController.getAll);
 router.get('/:id', productsController.getById);
 
+router.post('/import-json', rbac('admin', 'gerente'), productsController.importJson);
 router.post('/', rbac('admin', 'gerente'), productsController.create);
 router.put('/:id', rbac('admin', 'gerente'), productsController.update);
 router.delete('/:id', rbac('admin', 'gerente'), productsController.remove);

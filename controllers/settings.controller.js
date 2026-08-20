@@ -24,16 +24,19 @@ exports.getSettings = async (req, res) => {
     }
 
     if (!settings) {
-      // Crear settings por defecto
+      // Buscar información del negocio actual en la base de datos
+      const biz = await knex('businesses').where({ id: businessId }).first();
+
       const [newSettings] = await knex('settings').insert({
         business_id: businessId,
         branch_id: null,
-        business_name: 'GastrosPOS Enterprise',
-        nit: '900.123.456-7',
+        business_name: biz ? biz.name : 'Mi Negocio POS',
+        nit: biz?.nit || '',
         address: '',
         phone: '',
         receipt_footer: '¡Gracias por su compra! Vuelva pronto.',
-        default_paper_width: '80mm'
+        default_paper_width: '80mm',
+        logo_url: biz?.logo_url || ''
       }).returning('*');
       settings = newSettings;
     }

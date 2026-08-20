@@ -114,15 +114,34 @@ app.use('/api/advanced-reports', advancedReportsRoutes);
 // Manejador de errores para la API
 app.use('/api', errorHandler);
 
-// --- SPA: Servir el frontend (build de producción) ---
+// --- SPA / API Status Handling ---
+const fs = require('fs');
 const frontendDistPath = path.join(__dirname, '..', 'frontend', 'dist');
-app.use(express.static(frontendDistPath));
+const indexPath = path.join(frontendDistPath, 'index.html');
 
-// Catch-all: cualquier ruta que no sea /api/* devuelve el index.html del SPA
-// Esto permite que React Router maneje las rutas del lado del cliente
-app.get('*', (req, res) => {
-  res.sendFile(path.join(frontendDistPath, 'index.html'));
-});
+if (fs.existsSync(indexPath)) {
+  app.use(express.static(frontendDistPath));
+  app.get('*', (req, res) => {
+    res.sendFile(indexPath);
+  });
+} else {
+  // Cuando el backend está desplegado por separado en Render (API Only)
+  app.get('/', (req, res) => {
+    res.json({
+      status: 'online',
+      service: 'KAMIA by JF - POS & ERP API',
+      health: '/api/health',
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.get('*', (req, res) => {
+    res.status(404).json({
+      error: 'Ruta no encontrada',
+      message: 'Servidor API Backend activo. Para utilizar la interfaz gráfica, ingresa a la URL del frontend.'
+    });
+  });
+}
 
 const PORT = process.env.PORT || 3001;
 

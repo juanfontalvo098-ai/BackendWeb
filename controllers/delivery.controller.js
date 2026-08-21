@@ -314,6 +314,9 @@ exports.createDeliveryOrder = async (req, res) => {
         const orderItems = validItems.map(item => {
           const pId = parseInt(item.product_id, 10);
           const prod = prodMap[pId] || {};
+          const modifiersVal = item.modifiers_json || item.modifiers;
+          const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
           return {
             order_id: order.id,
             product_id: pId,
@@ -322,6 +325,7 @@ exports.createDeliveryOrder = async (req, res) => {
             tax_rate: parseFloat(prod.tax_rate || 0),
             tax_included: prod.tax_included !== undefined ? Boolean(prod.tax_included) : true,
             notes: item.notes || null,
+            modifiers_json: modifiersJson,
             status: 'pendiente'
           };
         });

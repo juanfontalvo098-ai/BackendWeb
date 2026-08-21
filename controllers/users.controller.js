@@ -50,6 +50,11 @@ exports.create = async (req, res) => {
     return res.status(400).json({ error: 'Todos los campos son obligatorios' });
   }
 
+  // Protección: Solo un super_admin puede crear otro super_admin
+  if (role === 'super_admin' && req.user?.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Solo un Super Administrador puede crear usuarios con rol de Super Admin' });
+  }
+
   try {
     // Verificar que el username no exista dentro del mismo negocio
     const existing = await knex('users')
@@ -72,13 +77,19 @@ exports.create = async (req, res) => {
       }
     }
 
+    // Filtrar permiso /negocios si quien crea no es super_admin
+    let safePermissions = Array.isArray(permissions) ? permissions : [];
+    if (req.user?.role !== 'super_admin') {
+      safePermissions = safePermissions.filter(p => p !== '/negocios');
+    }
+
     const [newUser] = await knex('users').insert({
       business_id: businessId,
       username,
       password_hash: bcrypt.hashSync(password, 10),
       full_name,
       role: role || 'mesero',
-      permissions: Array.isArray(permissions) ? JSON.stringify(permissions) : null,
+      permissions: safePermissions.length > 0 ? JSON.stringify(safePermissions) : null,
       branch_id: finalBranchId,
       is_active: true
     }).returning(['id', 'username', 'full_name', 'role', 'permissions', 'branch_id']);
@@ -105,6 +116,16 @@ exports.update = async (req, res) => {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    // Protección: Un admin normal no puede modificar una cuenta de Super Admin
+    if (user.role === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'No tienes permisos para modificar una cuenta de Super Administrador' });
+    }
+
+    // Protección: Un admin normal no puede ascender una cuenta a Super Admin
+    if (role === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Solo un Super Administrador puede asignar el rol de Super Admin' });
+    }
+
     let finalBranchId = null;
     if (branch_id && typeof branch_id === 'string' && branch_id.trim() !== '' && branch_id !== 'all') {
       const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(branch_id.trim());
@@ -116,11 +137,17 @@ exports.update = async (req, res) => {
       }
     }
 
+    // Filtrar permiso /negocios si quien edita no es super_admin
+    let safePermissions = Array.isArray(permissions) ? permissions : [];
+    if (req.user?.role !== 'super_admin') {
+      safePermissions = safePermissions.filter(p => p !== '/negocios');
+    }
+
     const updateData = {
       full_name,
-      role,
+      role: (req.user?.role !== 'super_admin' && user.role === 'admin' && role === 'super_admin') ? 'admin' : role,
       is_active,
-      permissions: Array.isArray(permissions) ? JSON.stringify(permissions) : null,
+      permissions: safePermissions.length > 0 ? JSON.stringify(safePermissions) : null,
       branch_id: finalBranchId,
       updated_at: knex.fn.now()
     };
@@ -145,6 +172,15 @@ exports.remove = async (req, res) => {
   const { businessId } = req.tenant;
 
   try {
+    const user = await knex('users').where({ id, business_id: businessId }).first();
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    if (user.role === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'No tienes permisos para desactivar una cuenta de Super Administrador' });
+    }
+
     await knex('users')
       .where({ id, business_id: businessId })
       .update({ is_active: false, updated_at: knex.fn.now() });
@@ -160,6 +196,15 @@ exports.deleteUser = async (req, res) => {
   const { businessId } = req.tenant;
 
   try {
+    const user = await knex('users').where({ id, business_id: businessId }).first();
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    if (user.role === 'super_admin' && req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'No tienes permisos para eliminar una cuenta de Super Administrador' });
+    }
+
     const deleted = await knex('users')
       .where({ id, business_id: businessId })
       .del();

@@ -11,6 +11,7 @@ exports.getAll = async (req, res) => {
       .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
       .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
         'u_cashier.full_name as cashier_name',
@@ -22,7 +23,12 @@ exports.getAll = async (req, res) => {
         'c.phone as customer_phone',
         'c.address as customer_address',
         'c.city as customer_city',
-        'c.email as customer_email'
+        'c.email as customer_email',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
       )
       .where('i.business_id', businessId);
 
@@ -56,6 +62,7 @@ exports.getById = async (req, res) => {
       .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
       .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
         'u_cashier.full_name as cashier_name',
@@ -67,7 +74,12 @@ exports.getById = async (req, res) => {
         'c.phone as customer_phone',
         'c.address as customer_address',
         'c.city as customer_city',
-        'c.email as customer_email'
+        'c.email as customer_email',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
       )
       .where({ 'i.id': req.params.id, 'i.business_id': businessId })
       .first();
@@ -96,6 +108,7 @@ exports.getPrintFormat = async (req, res) => {
       .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
       .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
         'o.order_type',
@@ -107,7 +120,12 @@ exports.getPrintFormat = async (req, res) => {
         'c.phone as customer_phone',
         'c.address as customer_address',
         'c.city as customer_city',
-        'c.email as customer_email'
+        'c.email as customer_email',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
       )
       .where({ 'i.id': req.params.id, 'i.business_id': businessId })
       .first();
@@ -455,6 +473,7 @@ exports.create = async (req, res) => {
       .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
       .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .leftJoin('customers as c', 'i.customer_id', 'c.id')
+      .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
         'u_cashier.full_name as cashier_name',
@@ -465,7 +484,12 @@ exports.create = async (req, res) => {
         'c.document_number as customer_document',
         'c.phone as customer_phone',
         'c.address as customer_address',
-        'c.email as customer_email'
+        'c.email as customer_email',
+        'ar.amount as credit_amount',
+        'ar.paid_amount as credit_paid_amount',
+        'ar.balance as credit_balance',
+        'ar.due_date as credit_due_date',
+        'ar.status as credit_status'
       )
       .where('i.id', invoiceId)
       .first();

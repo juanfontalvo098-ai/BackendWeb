@@ -1,6 +1,5 @@
-// Knex Configuration File — Multi-tenant POS System
-// Soporta desarrollo local y producción (VPS, Render, Railway, Neon, etc.)
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const dbConnectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_PRIVATE_URL;
 
@@ -37,8 +36,6 @@ const getConnectionConfig = () => {
     ssl: process.env.DB_SSL === 'true' ? getSslConfig() : false
   };
 };
-
-const path = require('path');
 
 module.exports = {
   development: {

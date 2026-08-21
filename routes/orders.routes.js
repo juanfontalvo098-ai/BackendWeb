@@ -16,6 +16,8 @@ router.put('/:id', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersControlle
 router.post('/:id/items', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.addItems);
 router.delete('/:id/items/:itemId', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.removeItem);
 router.put('/:id/items/:itemId/quantity', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.updateItemQuantity);
+router.put('/:id/items/:itemId/price', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.updateItemPrice);
+router.put('/:id/items/:itemId/notes', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.updateItemNotes);
 
 router.post('/:id/send-kitchen', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.sendToKitchen);
 router.post('/:id/send-to-kitchen', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.sendToKitchen);

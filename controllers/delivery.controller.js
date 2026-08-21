@@ -57,35 +57,62 @@ exports.updateZone = async (req, res) => {
   }
 };
 
-// --- Asignaciones de delivery ---
+// --- Asignaciones y Despachos de delivery ---
 exports.getAssignments = async (req, res) => {
   try {
     const { businessId, branchId, isGlobalScope } = req.tenant;
     const { status, driver_user_id } = req.query;
 
-    let query = knex('delivery_assignments as da')
-      .join('orders as o', 'da.order_id', 'o.id')
-      .join('users as driver', 'da.driver_user_id', 'driver.id')
+    let query = knex('orders as o')
+      .leftJoin('delivery_assignments as da', 'o.id', 'da.order_id')
+      .leftJoin('users as driver', 'da.driver_user_id', 'driver.id')
       .leftJoin('delivery_zones as dz', 'da.delivery_zone_id', 'dz.id')
       .leftJoin('customers as c', 'o.customer_id', 'c.id')
       .select(
-        'da.*', 'o.order_type', 'o.delivery_address', 'o.delivery_phone',
-        'o.delivery_notes', 'o.delivery_fee', 'o.discount_amount', 'o.status as order_status',
+        'o.id as order_id',
+        'da.id as id',
+        'da.status as assignment_status',
+        'da.assigned_at',
+        'da.picked_up_at',
+        'da.delivered_at',
+        'da.notes as assignment_notes',
+        'da.driver_user_id',
+        'da.delivery_zone_id',
+        'o.order_type',
+        'o.delivery_address',
+        'o.delivery_phone',
+        'o.delivery_notes',
+        'o.delivery_fee',
+        'o.discount_amount',
+        'o.status as order_status',
         'o.created_at as order_date',
-        'driver.full_name as driver_name', 'dz.name as zone_name',
+        'driver.full_name as driver_name',
+        'dz.name as zone_name',
         'dz.delivery_fee as zone_delivery_fee',
-        'c.name as customer_name', 'c.phone as customer_phone'
+        'c.name as customer_name',
+        'c.phone as customer_phone'
       )
-      .where('o.business_id', businessId);
+      .where('o.business_id', businessId)
+      .andWhere('o.order_type', 'delivery')
+      .whereNotIn('o.status', ['cancelada']);
 
     if (branchId && !isGlobalScope) query.andWhere('o.branch_id', branchId);
-    if (status) query.andWhere('da.status', status);
+    if (status) {
+      if (status === 'sin_asignar') {
+        query.whereNull('da.id');
+      } else {
+        query.andWhere('da.status', status);
+      }
+    }
     if (driver_user_id) query.andWhere('da.driver_user_id', parseInt(driver_user_id));
 
-    const assignments = await query.orderBy('da.assigned_at', 'desc');
+    const rows = await query.orderBy('o.created_at', 'desc');
 
     // Cargar ítems y calcular total para cada despacho
-    for (const a of assignments) {
+    for (const a of rows) {
+      // Estado unificado del despacho
+      a.status = a.assignment_status || 'sin_asignar';
+
       const items = await knex('order_items as oi')
         .join('products as p', 'oi.product_id', 'p.id')
         .select('oi.*', 'p.name')
@@ -105,7 +132,7 @@ exports.getAssignments = async (req, res) => {
       a.grand_total = Math.max(0, itemsTotal - disc) + delFee;
     }
 
-    res.json(assignments);
+    res.json(rows);
   } catch (err) {
     console.error('Error al obtener asignaciones:', err);
     res.status(500).json({ error: 'Error al obtener asignaciones de delivery' });
@@ -123,18 +150,37 @@ exports.assignDriver = async (req, res) => {
       });
     }
 
-    const [assignment] = await knex('delivery_assignments').insert({
-      order_id,
-      driver_user_id,
-      delivery_zone_id: delivery_zone_id || null,
-      notes: notes || null
-    }).returning('*');
+    const existing = await knex('delivery_assignments').where({ order_id }).first();
+    let assignment;
+
+    if (existing) {
+      const [updated] = await knex('delivery_assignments').where({ id: existing.id }).update({
+        driver_user_id: parseInt(driver_user_id, 10),
+        delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
+        notes: notes || null,
+        status: 'asignado',
+        assigned_at: knex.fn.now()
+      }).returning('*');
+      assignment = updated;
+    } else {
+      const [inserted] = await knex('delivery_assignments').insert({
+        order_id: parseInt(order_id, 10),
+        driver_user_id: parseInt(driver_user_id, 10),
+        delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
+        notes: notes || null,
+        status: 'asignado'
+      }).returning('*');
+      assignment = inserted;
+    }
 
     // Emitir evento por WebSocket
     const order = await knex('orders').where('id', order_id).first();
-    if (req.app.locals.io && order) {
+    if (req.app && req.app.locals && req.app.locals.io && order) {
       req.app.locals.io.to(`branch:${order.branch_id}`).emit('delivery:assigned', {
         order_id, driver_user_id
+      });
+      req.app.locals.io.to(`branch:${order.branch_id}`).emit('delivery:status-changed', {
+        order_id, status: 'asignado'
       });
     }
 
@@ -160,12 +206,11 @@ exports.updateAssignmentStatus = async (req, res) => {
     const assignment = await knex('delivery_assignments').where('id', id).first();
     if (assignment) {
       const order = await knex('orders').where('id', assignment.order_id).first();
-      if (req.app.locals.io && order) {
+      if (req.app && req.app.locals && req.app.locals.io && order) {
         req.app.locals.io.to(`branch:${order.branch_id}`).emit('delivery:status-changed', {
           order_id: assignment.order_id, status
         });
       }
-      // Nota: La orden NO se cierra automáticamente aquí. Se cierra al facturar y confirmar pago en /facturacion.
     }
 
     res.json({ message: 'Estado de entrega actualizado' });
@@ -183,15 +228,30 @@ exports.getPendingOrders = async (req, res) => {
     let query = knex('orders as o')
       .leftJoin('customers as c', 'o.customer_id', 'c.id')
       .leftJoin('delivery_assignments as da', 'o.id', 'da.order_id')
-      .select('o.*', 'c.name as customer_name', 'c.phone as customer_phone')
+      .select('o.*', 'c.name as customer_name', 'c.phone as customer_phone', 'c.address as customer_address')
       .where('o.business_id', businessId)
       .andWhere('o.order_type', 'delivery')
-      .andWhere('o.status', 'abierta')
+      .whereNotIn('o.status', ['cerrada', 'cancelada'])
       .whereNull('da.id');
 
     if (branchId && !isGlobalScope) query.andWhere('o.branch_id', branchId);
 
     const pending = await query.orderBy('o.created_at', 'desc');
+
+    for (const po of pending) {
+      const items = await knex('order_items as oi')
+        .join('products as p', 'oi.product_id', 'p.id')
+        .select('oi.*', 'p.name')
+        .where('oi.order_id', po.id);
+      po.items = items;
+      let itemsTotal = 0;
+      items.forEach(i => {
+        itemsTotal += (parseFloat(i.quantity) || 0) * (parseFloat(i.unit_price) || 0);
+      });
+      po.items_total = itemsTotal;
+      po.computed_total = Math.max(0, itemsTotal - (parseFloat(po.discount_amount) || 0)) + (parseFloat(po.delivery_fee) || 0);
+    }
+
     res.json(pending);
   } catch (err) {
     console.error('Error al obtener pedidos pendientes de delivery:', err);

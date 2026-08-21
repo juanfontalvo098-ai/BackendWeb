@@ -200,6 +200,9 @@ exports.create = async (req, res) => {
           for (const item of req.body.items) {
             const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
             if (prod) {
+              const modifiersVal = item.modifiers_json || item.modifiers;
+              const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
               const [inserted] = await knex('order_items').insert({
                 order_id: existingOrder.id,
                 product_id: prod.id,
@@ -209,9 +212,27 @@ exports.create = async (req, res) => {
                 tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
                 status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
                 notes: item.notes || null,
+                modifiers_json: modifiersJson,
                 sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
               }).returning('*');
-              newItemsList.push({ name: prod.name, quantity: inserted.quantity, notes: inserted.notes });
+
+              let modsText = '';
+              if (modifiersJson) {
+                try {
+                  const parsed = JSON.parse(modifiersJson);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                  }
+                } catch (e) {}
+              }
+
+              newItemsList.push({
+                name: prod.name,
+                quantity: inserted.quantity,
+                notes: inserted.notes,
+                modifiers: modsText || undefined,
+                modifiers_json: modifiersJson
+              });
             }
           }
 
@@ -278,6 +299,9 @@ exports.create = async (req, res) => {
       for (const item of req.body.items) {
         const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
         if (prod) {
+          const modifiersVal = item.modifiers_json || item.modifiers;
+          const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
           const [inserted] = await knex('order_items').insert({
             order_id: newOrder.id,
             product_id: prod.id,
@@ -287,9 +311,26 @@ exports.create = async (req, res) => {
             tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
             status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
             notes: item.notes || null,
+            modifiers_json: modifiersJson,
             sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
           }).returning('*');
-          newItemsList.push({ name: prod.name, quantity: inserted.quantity, notes: inserted.notes });
+
+          let modsText = '';
+          if (modifiersJson) {
+            try {
+              const parsed = JSON.parse(modifiersJson);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+              }
+            } catch (e) {}
+          }
+
+          newItemsList.push({
+            name: prod.name,
+            quantity: inserted.quantity,
+            notes: inserted.notes,
+            modifiers: modsText || undefined
+          });
         }
       }
 
@@ -311,7 +352,6 @@ exports.create = async (req, res) => {
     if (finalOrderType === 'delivery') {
       if (delivery_driver_id) {
         await knex('delivery_assignments').insert({
-          business_id: businessId,
           order_id: newOrder.id,
           driver_user_id: parseInt(delivery_driver_id, 10),
           delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
@@ -322,6 +362,12 @@ exports.create = async (req, res) => {
 
     if (req.app && req.app.locals && req.app.locals.io) {
       req.app.locals.io.to(`branch:${branchId}`).emit('order:created', { order_id: newOrder.id });
+      if (finalOrderType === 'delivery') {
+        req.app.locals.io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: newOrder.id });
+        if (delivery_driver_id) {
+          req.app.locals.io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: newOrder.id, driver_user_id: delivery_driver_id });
+        }
+      }
       const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
       req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
         order_id: newOrder.id, table_number: tableDisplay
@@ -360,6 +406,9 @@ exports.addItems = async (req, res) => {
           ? parseFloat(item.unit_price)
           : parseFloat(product.price);
 
+        const modifiersVal = item.modifiers_json || item.modifiers;
+        const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
         await trx('order_items').insert({
           order_id: id,
           product_id: item.product_id,
@@ -367,7 +416,8 @@ exports.addItems = async (req, res) => {
           unit_price: priceToUse,
           tax_rate: product.tax_rate,
           tax_included: product.tax_included,
-          notes: item.notes || null
+          notes: item.notes || null,
+          modifiers_json: modifiersJson
         });
       }
 
@@ -452,15 +502,23 @@ exports.updateOrder = async (req, res) => {
         for (const item of items) {
           if (item.id) {
             // Actualizar existente
-            await trx('order_items').where('id', item.id).update({
+            const updateItemObj = {
               quantity: parseInt(item.quantity, 10) || 1,
               unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : undefined,
               notes: item.notes || null
-            });
+            };
+            if (item.modifiers_json !== undefined || item.modifiers !== undefined) {
+              const modifiersVal = item.modifiers_json !== undefined ? item.modifiers_json : item.modifiers;
+              updateItemObj.modifiers_json = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+            }
+            await trx('order_items').where('id', item.id).update(updateItemObj);
           } else if (item.product_id) {
             // Insertar nuevo ítem
             const prod = await trx('products').where('id', item.product_id).first();
             if (prod) {
+              const modifiersVal = item.modifiers_json || item.modifiers;
+              const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
               const [inserted] = await trx('order_items').insert({
                 order_id: id,
                 product_id: prod.id,
@@ -469,16 +527,37 @@ exports.updateOrder = async (req, res) => {
                 tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
                 tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
                 status: 'pendiente',
-                notes: item.notes || null
+                notes: item.notes || null,
+                modifiers_json: modifiersJson
               }).returning('*');
-              newlyAddedItems.push({ ...inserted, name: prod.name });
+
+              let modsText = '';
+              if (modifiersJson) {
+                try {
+                  const parsed = JSON.parse(modifiersJson);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                  }
+                } catch (e) {}
+              }
+
+              newlyAddedItems.push({
+                ...inserted,
+                name: prod.name,
+                modifiers: modsText || undefined
+              });
             }
           }
         }
 
         // Si se pidió enviar a cocina y hay nuevos ítems
         if (send_to_kitchen && newlyAddedItems.length > 0) {
-          const itemsJson = newlyAddedItems.map(i => ({ name: i.name, quantity: i.quantity, notes: i.notes }));
+          const itemsJson = newlyAddedItems.map(i => ({
+            name: i.name,
+            quantity: i.quantity,
+            notes: i.notes,
+            modifiers: i.modifiers
+          }));
           const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
           await trx('kitchen_tickets').insert({
             business_id: businessId,
@@ -522,12 +601,18 @@ exports.updateOrder = async (req, res) => {
 };
 
 exports.removeItem = async (req, res) => {
+  const { businessId } = req.tenant;
   try {
-    const item = await knex('order_items').where('id', req.params.itemId).first();
+    const item = await knex('order_items as oi')
+      .join('orders as o', 'oi.order_id', 'o.id')
+      .select('oi.*', 'o.table_id', 'o.status as order_status', 'o.branch_id')
+      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .first();
+
     if (!item) return res.json({ message: 'Ítem no encontrado' });
 
     await knex('order_items')
-      .where({ id: req.params.itemId, status: 'pendiente' })
+      .where({ id: req.params.itemId })
       .del();
 
     const remainingCount = await knex('order_items')
@@ -535,18 +620,22 @@ exports.removeItem = async (req, res) => {
       .count('id as count')
       .first();
 
-    const order = await knex('orders').where('id', item.order_id).first();
-
-    if (parseInt(remainingCount.count) === 0 && order && order.status === 'abierta' && order.table_id) {
-      await knex('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
+    if (parseInt(remainingCount.count) === 0 && item.order_status === 'abierta' && item.table_id) {
+      await knex('tables_restaurant').where('id', item.table_id).update({ status: 'libre' });
       if (req.app && req.app.locals && req.app.locals.io) {
-        req.app.locals.io.to(`branch:${order.branch_id}`).emit('table:status-changed', {
-          table_id: order.table_id, status: 'libre'
+        req.app.locals.io.to(`branch:${item.branch_id}`).emit('table:status-changed', {
+          table_id: item.table_id, status: 'libre'
         });
       }
     }
 
-    res.json({ message: 'Ítem eliminado' });
+    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+    }
+
+    res.json({ message: 'Ítem eliminado de la comanda' });
   } catch (err) {
     console.error('Error al eliminar ítem:', err);
     res.status(500).json({ error: 'Error al eliminar ítem' });
@@ -555,16 +644,101 @@ exports.removeItem = async (req, res) => {
 
 exports.updateItemQuantity = async (req, res) => {
   const { quantity } = req.body;
+  const { businessId } = req.tenant;
   try {
-    const result = await knex('order_items')
-      .where({ id: req.params.itemId, status: 'pendiente' })
-      .update({ quantity });
+    const item = await knex('order_items as oi')
+      .join('orders as o', 'oi.order_id', 'o.id')
+      .select('oi.*', 'o.branch_id')
+      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .first();
 
-    if (result === 0) return res.status(400).json({ error: 'No se puede modificar este ítem' });
+    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
+
+    const newQty = parseInt(quantity, 10);
+    if (newQty <= 0) {
+      await knex('order_items').where({ id: req.params.itemId }).del();
+    } else {
+      await knex('order_items')
+        .where({ id: req.params.itemId })
+        .update({ quantity: newQty });
+    }
+
+    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+    }
+
     res.json({ message: 'Cantidad actualizada' });
   } catch (err) {
     console.error('Error al actualizar cantidad:', err);
     res.status(500).json({ error: 'Error al actualizar cantidad' });
+  }
+};
+
+exports.updateItemPrice = async (req, res) => {
+  const { unit_price } = req.body;
+  const { businessId } = req.tenant;
+  try {
+    const item = await knex('order_items as oi')
+      .join('orders as o', 'oi.order_id', 'o.id')
+      .join('products as p', 'oi.product_id', 'p.id')
+      .select('oi.*', 'p.price as catalog_price', 'o.branch_id')
+      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .first();
+
+    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
+
+    const newPrice = parseFloat(unit_price);
+    const catalogPrice = parseFloat(item.catalog_price || 0);
+
+    if (isNaN(newPrice) || newPrice < catalogPrice) {
+      return res.status(400).json({ error: `El precio no puede ser menor al precio de catálogo (${catalogPrice})` });
+    }
+
+    await knex('order_items')
+      .where({ id: req.params.itemId })
+      .update({ unit_price: newPrice });
+
+    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+    }
+
+    res.json({ message: 'Precio especial actualizado exitosamente' });
+  } catch (err) {
+    console.error('Error al actualizar precio:', err);
+    res.status(500).json({ error: 'Error al actualizar precio del producto' });
+  }
+};
+
+exports.updateItemNotes = async (req, res) => {
+  const { notes } = req.body;
+  const { businessId } = req.tenant;
+  try {
+    const item = await knex('order_items as oi')
+      .join('orders as o', 'oi.order_id', 'o.id')
+      .select('oi.*', 'o.branch_id')
+      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .first();
+
+    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
+
+    await knex('order_items')
+      .where({ id: req.params.itemId })
+      .update({ notes: notes || null });
+
+    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+    }
+
+    res.json({ message: 'Nota actualizada exitosamente' });
+  } catch (err) {
+    console.error('Error al actualizar nota:', err);
+    res.status(500).json({ error: 'Error al actualizar nota del producto' });
   }
 };
 

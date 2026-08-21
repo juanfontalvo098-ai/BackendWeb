@@ -526,6 +526,36 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
         userId
       });
     }
+
+    // Descontar insumos de modificadores, sabores y toppings seleccionados
+    const rawModifiers = item.modifiers_json || item.modifiers;
+    if (rawModifiers) {
+      let parsedModifiers = [];
+      try {
+        parsedModifiers = typeof rawModifiers === 'string' ? JSON.parse(rawModifiers) : rawModifiers;
+      } catch (e) {
+        parsedModifiers = Array.isArray(rawModifiers) ? rawModifiers : [];
+      }
+
+      if (Array.isArray(parsedModifiers)) {
+        for (const mod of parsedModifiers) {
+          if (mod.supply_id && mod.supply_quantity) {
+            const modQty = parseFloat(mod.quantity || 1);
+            const neededSupplyQty = (parseFloat(mod.supply_quantity) || 0) * modQty * itemQty;
+            if (neededSupplyQty > 0) {
+              await deductSingleSupply(trx, {
+                businessId,
+                branchId,
+                supplyId: mod.supply_id,
+                quantity: neededSupplyQty,
+                invoiceId,
+                userId
+              });
+            }
+          }
+        }
+      }
+    }
   }
 };
 

@@ -61,32 +61,35 @@ exports.create = async (req, res) => {
     }
 
     // Si se especifica branch_id, validar que pertenece al negocio
-    if (branch_id) {
-      const branch = await knex('branches')
-        .where({ id: branch_id, business_id: businessId })
-        .first();
-      if (!branch) {
-        return res.status(400).json({ error: 'La sucursal especificada no existe o no pertenece a tu negocio' });
+    let finalBranchId = null;
+    if (branch_id && typeof branch_id === 'string' && branch_id.trim() !== '' && branch_id !== 'all') {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(branch_id.trim());
+      if (isUuid) {
+        const branch = await knex('branches')
+          .where({ id: branch_id.trim(), business_id: businessId })
+          .first();
+        if (branch) finalBranchId = branch.id;
       }
     }
 
-    const hash = bcrypt.hashSync(password, 10);
-    const permsData = Array.isArray(permissions) ? JSON.stringify(permissions) : null;
-
     const [newUser] = await knex('users').insert({
       business_id: businessId,
-      branch_id: branch_id || null,
       username,
-      password_hash: hash,
+      password_hash: bcrypt.hashSync(password, 10),
       full_name,
-      role,
-      permissions: permsData
-    }).returning(['id', 'username', 'full_name', 'role']);
+      role: role || 'mesero',
+      permissions: Array.isArray(permissions) ? JSON.stringify(permissions) : null,
+      branch_id: finalBranchId,
+      is_active: true
+    }).returning(['id', 'username', 'full_name', 'role', 'permissions', 'branch_id']);
 
-    res.status(201).json({ id: newUser.id, message: 'Usuario creado exitosamente' });
+    res.status(201).json({
+      message: 'Usuario creado exitosamente',
+      user: newUser
+    });
   } catch (err) {
     console.error('Error al crear usuario:', err);
-    res.status(500).json({ error: 'Error al crear el usuario en la base de datos' });
+    res.status(500).json({ error: 'Error al crear usuario' });
   }
 };
 
@@ -102,12 +105,23 @@ exports.update = async (req, res) => {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    let finalBranchId = null;
+    if (branch_id && typeof branch_id === 'string' && branch_id.trim() !== '' && branch_id !== 'all') {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(branch_id.trim());
+      if (isUuid) {
+        const branch = await knex('branches')
+          .where({ id: branch_id.trim(), business_id: businessId })
+          .first();
+        if (branch) finalBranchId = branch.id;
+      }
+    }
+
     const updateData = {
       full_name,
       role,
       is_active,
       permissions: Array.isArray(permissions) ? JSON.stringify(permissions) : null,
-      branch_id: branch_id || null,
+      branch_id: finalBranchId,
       updated_at: knex.fn.now()
     };
 

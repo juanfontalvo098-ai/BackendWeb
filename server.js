@@ -1,8 +1,8 @@
 process.env.TZ = process.env.TZ || 'America/Bogota';
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -39,6 +39,7 @@ const suppliesRoutes = require('./routes/supplies.routes');
 const supplyCategoriesRoutes = require('./routes/supplyCategories.routes');
 const electronicInvoiceRoutes = require('./routes/electronicInvoice.routes');
 const advancedReportsRoutes = require('./routes/advancedReports.routes');
+const modifiersRoutes = require('./routes/modifiers.routes');
 
 const app = express();
 const server = http.createServer(app);
@@ -111,6 +112,7 @@ app.use('/api/accounting', accountingRoutes);
 app.use('/api/hr', hrRoutes);
 app.use('/api/electronic-invoice', electronicInvoiceRoutes);
 app.use('/api/advanced-reports', advancedReportsRoutes);
+app.use('/api/modifiers', modifiersRoutes);
 
 // Manejador de errores para la API
 app.use('/api', errorHandler);

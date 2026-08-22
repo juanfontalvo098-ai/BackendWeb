@@ -249,12 +249,24 @@ exports.create = async (req, res) => {
           }
 
           if (req.app && req.app.locals && req.app.locals.io) {
-            req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: existingOrder.id });
-            if (req.body.send_to_kitchen) {
+            const io = req.app.locals.io;
+            io.to(`branch:${branchId}`).emit('order:updated', { order_id: existingOrder.id });
+            if (req.body.send_to_kitchen && newItemsList.length > 0) {
               const tableDisplay = table.table_number || `Mesa ${table_id}`;
-              req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
-                order_id: existingOrder.id, table_number: tableDisplay
-              });
+              const ticketPayload = {
+                order_id: existingOrder.id,
+                business_id: businessId,
+                branch_id: branchId,
+                table_number: tableDisplay,
+                items: newItemsList,
+                notes: existingOrder.notes || '',
+                waiter_name: user?.full_name || user?.name || 'Personal',
+                order_type: 'mesa',
+                created_at: new Date().toISOString()
+              };
+              io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+              io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
+              io.emit('kitchen:new-ticket', ticketPayload);
             }
           }
         }
@@ -361,17 +373,31 @@ exports.create = async (req, res) => {
     }
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${branchId}`).emit('order:created', { order_id: newOrder.id });
+      const io = req.app.locals.io;
+      io.to(`branch:${branchId}`).emit('order:created', { order_id: newOrder.id });
       if (finalOrderType === 'delivery') {
-        req.app.locals.io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: newOrder.id });
+        io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: newOrder.id });
         if (delivery_driver_id) {
-          req.app.locals.io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: newOrder.id, driver_user_id: delivery_driver_id });
+          io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: newOrder.id, driver_user_id: delivery_driver_id });
         }
       }
-      const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
-      req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
-        order_id: newOrder.id, table_number: tableDisplay
-      });
+      if (req.body.send_to_kitchen && newItemsList.length > 0) {
+        const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+        const ticketPayload = {
+          order_id: newOrder.id,
+          business_id: businessId,
+          branch_id: branchId,
+          table_number: tableDisplay,
+          items: newItemsList,
+          notes: notes || '',
+          waiter_name: user?.full_name || user?.name || 'Personal',
+          order_type: finalOrderType,
+          created_at: new Date().toISOString()
+        };
+        io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+        io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
+        io.emit('kitchen:new-ticket', ticketPayload);
+      }
     }
 
     res.status(201).json({ id: newOrder.id, message: 'Orden creada exitosamente', order: newOrder });
@@ -575,7 +601,31 @@ exports.updateOrder = async (req, res) => {
     });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
+      const io = req.app.locals.io;
+      io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
+      if (send_to_kitchen && newlyAddedItems.length > 0) {
+        const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+        const itemsJson = newlyAddedItems.map(i => ({
+          name: i.name,
+          quantity: i.quantity,
+          notes: i.notes,
+          modifiers: i.modifiers
+        }));
+        const ticketPayload = {
+          order_id: id,
+          business_id: businessId,
+          branch_id: order.branch_id,
+          table_number: tableDisplay,
+          items: itemsJson,
+          notes: order.notes || '',
+          waiter_name: user?.full_name || user?.name || 'Personal',
+          order_type: order.order_type,
+          created_at: new Date().toISOString()
+        };
+        io.to(`branch:${order.branch_id}`).emit('kitchen:new-ticket', ticketPayload);
+        io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
+        io.emit('kitchen:new-ticket', ticketPayload);
+      }
     }
 
     const updatedOrder = await knex('orders as o')
@@ -788,19 +838,28 @@ exports.sendToKitchen = async (req, res) => {
 
     if (req.app && req.app.locals && req.app.locals.io) {
       const branchId = order.branch_id;
-      req.app.locals.io.to(`branch:${branchId}`).emit('kitchen:new-ticket', {
+      const io = req.app.locals.io;
+      const ticketPayload = {
         order_id: id, 
+        business_id: businessId,
+        branch_id: branchId,
         table_number: tableDisplay,
         items: itemsJson,
+        notes: order.notes || '',
+        waiter_name: user?.full_name || user?.name || 'Personal',
         order_type: order.order_type,
         created_at: new Date().toISOString()
-      });
+      };
+      io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+      io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
+      io.emit('kitchen:new-ticket', ticketPayload);
+
       if (order.table_id) {
-        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', {
+        io.to(`branch:${branchId}`).emit('table:status-changed', {
           table_id: order.table_id, status: 'ocupada'
         });
       }
-      req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
+      io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
     }
 
     res.json({ message: 'Comanda enviada a cocina exitosamente' });

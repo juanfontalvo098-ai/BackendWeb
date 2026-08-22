@@ -91,70 +91,28 @@ function printNetworkSocket(ip, port = 9100, buffer) {
  */
 function printWindowsSpooler(printerName, buffer) {
   return new Promise((resolve, reject) => {
-    const isVirtual = /(pdf|onenote|xps|fax)/i.test(printerName || '');
-    const ext = isVirtual ? '.txt' : '.bin';
-    const tempFile = path.join(os.tmpdir(), `kamia_print_${Date.now()}_${Math.random().toString(36).substr(2, 6)}${ext}`);
+    const tempDir = os.tmpdir();
+    const tempFile = path.join(tempDir, `kamia_print_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.bin`);
 
-    let fileData = buffer;
-    if (isVirtual) {
-      // Limpiar códigos de control ESC/POS en Node.js para que el texto sea 100% puro y legible
-      const rawStr = buffer.toString('latin1');
-      const cleanStr = rawStr.replace(/[^\x20-\x7E\r\n\t\xA0-\xFF]/g, '');
-      fileData = Buffer.from(cleanStr, 'utf8');
-
-      try {
-        const docsDir = path.join(os.homedir(), 'Documents');
-        if (fs.existsSync(docsDir)) {
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-          const savedFile = path.join(docsDir, `KAMIA_Factura_POS_${timestamp}.txt`);
-          const latestFile = path.join(docsDir, 'Ultima_Factura_POS.txt');
-          fs.writeFileSync(savedFile, cleanStr, 'utf8');
-          fs.writeFileSync(latestFile, cleanStr, 'utf8');
-          // Abrir automáticamente el archivo generado para vista previa inmediata
-          exec(`start "" "${latestFile}"`);
-        }
-      } catch (docErr) {
-        console.warn('[PrintBridge] No se pudo guardar copia en Documentos:', docErr.message);
-      }
-    }
-
-    fs.writeFile(tempFile, fileData, (writeErr) => {
+    fs.writeFile(tempFile, buffer, (writeErr) => {
       if (writeErr) return reject(writeErr);
 
-      const targetPrinter = printerName && printerName !== 'Impresora Predeterminada de Windows'
-        ? printerName.replace(/'/g, "''")
-        : '';
+      const targetPrinter = (printerName && printerName.trim()) ? printerName.trim() : '';
 
-      const psScript = isVirtual ? `
-$tempFile = '${tempFile.replace(/'/g, "''")}';
-$printerName = '${targetPrinter}';
-if (-not $printerName) {
-  $defaultPrinter = Get-CimInstance Win32_Printer | Where-Object { $_.Default -eq $true } | Select-Object -First 1;
-  if ($defaultPrinter) { $printerName = $defaultPrinter.Name }
-}
-try {
-  Get-Content -Path $tempFile -Encoding UTF8 | Out-Printer -Name $printerName -ErrorAction SilentlyContinue
-} catch {}
-exit 0
-`.trim() : `
-$tempFile = '${tempFile.replace(/'/g, "''")}';
-$printerName = '${targetPrinter}';
+      // Script PowerShell con P/Invoke a winspool.Drv para envío RAW 100% puro y silencioso
+      const psScript = `
+$ErrorActionPreference = 'Stop'
+$printerName = "${targetPrinter.replace(/"/g, '`"')}"
+$filePath = "${tempFile.replace(/\\/g, '\\\\')}"
 
-if (-not $printerName) {
-  $defaultPrinter = Get-CimInstance Win32_Printer | Where-Object { $_.Default -eq $true } | Select-Object -First 1;
-  if ($defaultPrinter) { $printerName = $defaultPrinter.Name }
-  else {
-    $anyPrinter = Get-CimInstance Win32_Printer | Select-Object -First 1;
-    if ($anyPrinter) { $printerName = $anyPrinter.Name }
-  }
+if ([string]::IsNullOrWhiteSpace($printerName)) {
+    $def = Get-CimInstance Win32_Printer -Filter "Default = True" -ErrorAction SilentlyContinue
+    if ($def) { $printerName = $def.Name }
 }
 
-if (-not $printerName) {
-  exit 1
-}
-
-$code = @"
+$rawType = @"
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 
 public class RawPrinterHelper {
@@ -172,7 +130,7 @@ public class RawPrinterHelper {
     public static extern bool ClosePrinter(IntPtr hPrinter);
 
     [DllImport("winspool.Drv", EntryPoint = "StartDocPrinterA", SetLastError = true, CharSet = CharSet.Ansi, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
-    public static extern bool StartDocPrinter(IntPtr hPrinter, int level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFOA di);
+    public static extern bool StartDocPrinter(IntPtr hPrinter, Int32 level, [In, MarshalAs(UnmanagedType.LPStruct)] DOCINFOA di);
 
     [DllImport("winspool.Drv", EntryPoint = "EndDocPrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
     public static extern bool EndDocPrinter(IntPtr hPrinter);
@@ -184,56 +142,63 @@ public class RawPrinterHelper {
     public static extern bool EndPagePrinter(IntPtr hPrinter);
 
     [DllImport("winspool.Drv", EntryPoint = "WritePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
-    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
+    public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, Int32 dwCount, out Int32 dwWritten);
 
-    public static bool SendBytesToPrinter(string szPrinterName, byte[] pBytes) {
+    public static bool SendBytesToPrinter(string szPrinterName, byte[] bytes) {
         IntPtr hPrinter = new IntPtr(0);
         DOCINFOA di = new DOCINFOA();
-        bool bSuccess = false;
-
-        di.pDocName = "KAMIA POS Ticket";
+        di.pDocName = "KAMIA POS Thermal Document";
         di.pDataType = "RAW";
 
-        if (OpenPrinter(szPrinterName, out hPrinter, IntPtr.Zero)) {
+        if (OpenPrinter(szPrinterName.Normalize(), out hPrinter, IntPtr.Zero)) {
             if (StartDocPrinter(hPrinter, 1, di)) {
                 if (StartPagePrinter(hPrinter)) {
-                    IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(pBytes.Length);
-                    Marshal.Copy(pBytes, 0, pUnmanagedBytes, pBytes.Length);
+                    IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(bytes.Length);
+                    Marshal.Copy(bytes, 0, pUnmanagedBytes, bytes.Length);
                     int dwWritten = 0;
-                    bSuccess = WritePrinter(hPrinter, pUnmanagedBytes, pBytes.Length, out dwWritten);
+                    bool bSuccess = WritePrinter(hPrinter, pUnmanagedBytes, bytes.Length, out dwWritten);
                     Marshal.FreeCoTaskMem(pUnmanagedBytes);
                     EndPagePrinter(hPrinter);
+                    EndDocPrinter(hPrinter);
+                    ClosePrinter(hPrinter);
+                    return bSuccess;
                 }
                 EndDocPrinter(hPrinter);
             }
             ClosePrinter(hPrinter);
         }
-        return bSuccess;
+        return false;
     }
 }
 "@
 
 try {
-    if (-not ([System.Management.Automation.PSTypeName]'RawPrinterHelper').Type) {
-        Add-Type -TypeDefinition $code -ErrorAction Stop
-    }
-    $bytes = [System.IO.File]::ReadAllBytes($tempFile)
+    Add-Type -TypeDefinition $rawType -ErrorAction SilentlyContinue
+    $bytes = [System.IO.File]::ReadAllBytes($filePath)
     $ok = [RawPrinterHelper]::SendBytesToPrinter($printerName, $bytes)
-    if ($ok) {
-        exit 0
-    }
-} catch {}
-
-try {
-    Get-Content -Path $tempFile -Encoding Default | Out-Printer -Name $printerName -ErrorAction Stop
-    exit 0
+    if (-not $ok) { throw "WinSpool OpenPrinter failed for '$printerName'" }
+    Write-Output "OK_WINSPOOL"
 } catch {
-    exit 0
+    # Fallback si falla P/Invoke: Out-Printer o Copy /b a puerto
+    try {
+        if ([string]::IsNullOrWhiteSpace($printerName)) {
+            Get-Content -Path $filePath -Encoding Byte -Raw | Out-Printer
+        } else {
+            Get-Content -Path $filePath -Encoding Byte -Raw | Out-Printer -Name $printerName
+        }
+        Write-Output "OK_FALLBACK"
+    } catch {
+        throw $_
+    }
 }
-`.trim();
+`;
 
-      execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], { windowsHide: true, timeout: 8000 }, (psErr) => {
-        try { fs.unlinkSync(tempFile); } catch (e) {}
+      execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], { windowsHide: true, timeout: 8000 }, (psErr, psStdout, psStderr) => {
+        fs.unlink(tempFile, () => {});
+        if (psErr) {
+          console.warn(`[PrintBridge] Error en spooler:`, psStderr || psErr.message);
+          return reject(new Error(psStderr || psErr.message));
+        }
         resolve(true);
       });
     });
@@ -244,11 +209,12 @@ try {
  * Servidor HTTP
  */
 const server = http.createServer(async (req, res) => {
-  // CORS & Private Network Access Headers (para soportar HTTPS desde Render hacia localhost)
+  // CORS & Private Network Access Headers (para soportar HTTPS desde Render o IPs locales hacia localhost)
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   if (req.method === 'OPTIONS') {

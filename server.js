@@ -76,6 +76,27 @@ app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/print-bridge', express.static(path.join(__dirname, 'public/print-bridge')));
 
+// Endpoints de descarga directa de Print Bridge
+app.get('/api/print-bridge/download-installer', (req, res) => {
+  const filePath = path.join(__dirname, 'public/print-bridge/Instalar_Print_Bridge_KAMIA.bat');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Disposition', 'attachment; filename="Instalar_Print_Bridge_KAMIA.bat"');
+    res.setHeader('Content-Type', 'application/x-bat');
+    return res.sendFile(filePath);
+  }
+  return res.status(404).json({ error: 'Instalador no encontrado' });
+});
+
+app.get('/api/print-bridge/download-runner', (req, res) => {
+  const filePath = path.join(__dirname, 'public/print-bridge/Iniciar_Print_Bridge.bat');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Disposition', 'attachment; filename="Iniciar_Print_Bridge.bat"');
+    res.setHeader('Content-Type', 'application/x-bat');
+    return res.sendFile(filePath);
+  }
+  return res.status(404).json({ error: 'Script de inicio no encontrado' });
+});
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10000,

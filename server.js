@@ -40,6 +40,7 @@ const supplyCategoriesRoutes = require('./routes/supplyCategories.routes');
 const electronicInvoiceRoutes = require('./routes/electronicInvoice.routes');
 const advancedReportsRoutes = require('./routes/advancedReports.routes');
 const modifiersRoutes = require('./routes/modifiers.routes');
+const printingRoutes = require('./routes/printing.routes');
 
 const app = express();
 const server = http.createServer(app);
@@ -123,6 +124,7 @@ app.use('/api/hr', hrRoutes);
 app.use('/api/electronic-invoice', electronicInvoiceRoutes);
 app.use('/api/advanced-reports', advancedReportsRoutes);
 app.use('/api/modifiers', modifiersRoutes);
+app.use('/api/printing', printingRoutes);
 
 // Manejador de errores para la API
 app.use('/api', errorHandler);

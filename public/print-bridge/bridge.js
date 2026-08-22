@@ -1,7 +1,7 @@
 /**
  * KAMIA by JF — Node.js Thermal Print Bridge v2.0
  * Servidor HTTP local para impresión térmica silenciosa directa (ESC/POS)
- * Puerto por defecto: 8088
+ * Puerto por defecto: 8182
  */
 
 const http = require('http');
@@ -11,7 +11,7 @@ const os = require('os');
 const { exec, execFile } = require('child_process');
 const net = require('net');
 
-const PORT = process.env.PORT || 8088;
+const PORT = process.env.PORT || 8182;
 const HOST = '0.0.0.0';
 
 // Comandos ESC/POS estándar

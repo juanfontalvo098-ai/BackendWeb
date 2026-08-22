@@ -83,7 +83,7 @@ exports.updateSettings = async (req, res) => {
       enable_silent_printing: req.body.enable_silent_printing !== undefined ? !!req.body.enable_silent_printing : false,
       auto_print_kitchen_tickets: req.body.auto_print_kitchen_tickets !== undefined ? !!req.body.auto_print_kitchen_tickets : true,
       auto_print_invoices: req.body.auto_print_invoices !== undefined ? !!req.body.auto_print_invoices : false,
-      silent_print_bridge_url: req.body.silent_print_bridge_url || 'http://localhost:8088',
+      silent_print_bridge_url: req.body.silent_print_bridge_url || 'http://localhost:8182',
       printer_kitchen_name: req.body.printer_kitchen_name || '',
       printer_receipt_name: req.body.printer_receipt_name || ''
     };

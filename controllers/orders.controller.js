@@ -178,228 +178,236 @@ exports.create = async (req, res) => {
   if (!branchId) return res.status(400).json({ error: 'Se requiere una sucursal activa' });
 
   try {
-    const isMesaOrder = order_type === 'mesa' || (!order_type && table_id);
+    let finalOrder = null;
+    let itemsForKitchen = [];
+    let isNewOrder = false;
+    let finalOrderType = order_type || (table_id ? 'mesa' : 'para_llevar');
+    let resolvedTableDisplay = '';
 
-    if (isMesaOrder && table_id) {
-      const table = await knex('tables_restaurant')
-        .where({ id: table_id, business_id: businessId })
-        .first();
-      if (!table) return res.status(404).json({ error: 'Mesa no encontrada' });
+    await knex.transaction(async (trx) => {
+      const isMesaOrder = order_type === 'mesa' || (!order_type && table_id);
 
-      // Verificación interna silenciosa de orden activa existente en la mesa
-      const existingOrder = await knex('orders')
-        .where('table_id', table_id)
-        .whereNotIn('status', ['cerrada', 'cancelada'])
+      if (isMesaOrder && table_id) {
+        const table = await trx('tables_restaurant')
+          .where({ id: table_id, business_id: businessId })
+          .first();
+        if (!table) throw new Error('Mesa no encontrada');
+
+        resolvedTableDisplay = table.table_number ? (table.table_number.toLowerCase().startsWith('mesa') ? table.table_number : `Mesa ${table.table_number}`) : `Mesa ${table_id}`;
+
+        // Verificación interna silenciosa de orden activa existente en la mesa
+        const existingOrder = await trx('orders')
+          .where('table_id', table_id)
+          .whereNotIn('status', ['cerrada', 'cancelada'])
+          .orderBy('id', 'desc')
+          .first();
+
+        if (existingOrder) {
+          finalOrder = existingOrder;
+          if (Array.isArray(req.body.items) && req.body.items.length > 0) {
+            for (const item of req.body.items) {
+              const prod = await trx('products').where({ id: item.product_id, business_id: businessId }).first();
+              if (prod) {
+                const modifiersVal = item.modifiers_json || item.modifiers;
+                const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
+                const [inserted] = await trx('order_items').insert({
+                  order_id: existingOrder.id,
+                  product_id: prod.id,
+                  quantity: parseInt(item.quantity, 10) || 1,
+                  unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+                  tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
+                  tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+                  status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
+                  notes: item.notes || null,
+                  modifiers_json: modifiersJson,
+                  sent_to_kitchen_at: req.body.send_to_kitchen ? trx.fn.now() : null
+                }).returning('*');
+
+                let modsText = '';
+                if (modifiersJson) {
+                  try {
+                    const parsed = JSON.parse(modifiersJson);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                      modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                    }
+                  } catch (e) {}
+                }
+
+                itemsForKitchen.push({
+                  name: prod.name,
+                  quantity: inserted ? inserted.quantity : (parseInt(item.quantity, 10) || 1),
+                  notes: item.notes || null,
+                  modifiers: modsText || undefined,
+                  modifiers_json: modifiersJson
+                });
+              }
+            }
+
+            if (req.body.send_to_kitchen && itemsForKitchen.length > 0) {
+              await trx('kitchen_tickets').insert({
+                business_id: businessId,
+                branch_id: branchId,
+                order_id: existingOrder.id,
+                table_number: resolvedTableDisplay,
+                items_json: JSON.stringify(itemsForKitchen)
+              });
+              await trx('orders').where('id', existingOrder.id).update({ status: 'en_preparacion', updated_at: trx.fn.now() });
+            }
+          }
+
+          await trx('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
+          return;
+        }
+      }
+
+      // Si no hay orden existente en la mesa o es para llevar / delivery:
+      isNewOrder = true;
+      if (!resolvedTableDisplay) {
+        resolvedTableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+      }
+
+      // Asociar al turno de caja abierto actual
+      const activeShift = await trx('cash_registers')
+        .where({ branch_id: branchId, status: 'abierta' })
         .orderBy('id', 'desc')
         .first();
 
-      if (existingOrder) {
-        // Si ya hay una orden activa en la mesa, adjuntar los ítems sin crear comanda duplicada
-        if (Array.isArray(req.body.items) && req.body.items.length > 0) {
-          const newItemsList = [];
-          for (const item of req.body.items) {
-            const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
-            if (prod) {
-              const modifiersVal = item.modifiers_json || item.modifiers;
-              const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+      const [newOrder] = await trx('orders').insert({
+        business_id: businessId,
+        branch_id: branchId,
+        table_id: table_id || null,
+        cash_register_id: activeShift ? activeShift.id : null,
+        user_id,
+        guests: guests || 1,
+        notes: notes || null,
+        order_type: finalOrderType,
+        customer_id: customer_id || null,
+        delivery_address: delivery_address || null,
+        delivery_phone: delivery_phone || null,
+        delivery_notes: delivery_notes || null,
+        delivery_fee: (delivery_fee !== undefined && delivery_fee !== null) ? parseFloat(delivery_fee) : 0,
+        discount_amount: (discount_amount !== undefined && discount_amount !== null) ? parseFloat(discount_amount) : 0,
+        discount_type: discount_type || null
+      }).returning('*');
 
-              const [inserted] = await knex('order_items').insert({
-                order_id: existingOrder.id,
-                product_id: prod.id,
-                quantity: parseInt(item.quantity, 10) || 1,
-                unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
-                tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
-                tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
-                status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
-                notes: item.notes || null,
-                modifiers_json: modifiersJson,
-                sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
-              }).returning('*');
+      finalOrder = newOrder;
 
-              let modsText = '';
-              if (modifiersJson) {
-                try {
-                  const parsed = JSON.parse(modifiersJson);
-                  if (Array.isArray(parsed) && parsed.length > 0) {
-                    modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
-                  }
-                } catch (e) {}
-              }
+      if (table_id) {
+        await trx('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
+      }
 
-              newItemsList.push({
-                name: prod.name,
-                quantity: inserted.quantity,
-                notes: inserted.notes,
-                modifiers: modsText || undefined,
-                modifiers_json: modifiersJson
-              });
+      if (Array.isArray(req.body.items) && req.body.items.length > 0) {
+        for (const item of req.body.items) {
+          const prod = await trx('products').where({ id: item.product_id, business_id: businessId }).first();
+          if (prod) {
+            const modifiersVal = item.modifiers_json || item.modifiers;
+            const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
+
+            const [inserted] = await trx('order_items').insert({
+              order_id: newOrder.id,
+              product_id: prod.id,
+              quantity: parseInt(item.quantity, 10) || 1,
+              unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+              tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
+              tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+              status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
+              notes: item.notes || null,
+              modifiers_json: modifiersJson,
+              sent_to_kitchen_at: req.body.send_to_kitchen ? trx.fn.now() : null
+            }).returning('*');
+
+            let modsText = '';
+            if (modifiersJson) {
+              try {
+                const parsed = JSON.parse(modifiersJson);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                }
+              } catch (e) {}
             }
-          }
 
-          if (req.body.send_to_kitchen && newItemsList.length > 0) {
-            const tableDisplay = table.table_number || `Mesa ${table_id}`;
-            await knex('kitchen_tickets').insert({
-              business_id: businessId,
-              branch_id: branchId,
-              order_id: existingOrder.id,
-              table_number: tableDisplay,
-              items_json: JSON.stringify(newItemsList)
+            itemsForKitchen.push({
+              name: prod.name,
+              quantity: inserted ? inserted.quantity : (parseInt(item.quantity, 10) || 1),
+              notes: item.notes || null,
+              modifiers: modsText || undefined,
+              modifiers_json: modifiersJson
             });
-            await knex('orders').where('id', existingOrder.id).update({ status: 'en_preparacion' });
-          }
-
-          if (req.app && req.app.locals && req.app.locals.io) {
-            const io = req.app.locals.io;
-            io.to(`branch:${branchId}`).emit('order:updated', { order_id: existingOrder.id });
-            if (req.body.send_to_kitchen && newItemsList.length > 0) {
-              const tableDisplay = table.table_number || `Mesa ${table_id}`;
-              const ticketPayload = {
-                order_id: existingOrder.id,
-                business_id: businessId,
-                branch_id: branchId,
-                table_number: tableDisplay,
-                items: newItemsList,
-                notes: existingOrder.notes || '',
-                waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
-                order_type: 'mesa',
-                created_at: new Date().toISOString()
-              };
-              io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
-            }
           }
         }
 
-        await knex('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
-        return res.status(200).json({ id: existingOrder.id, message: 'Ítems incorporados a la orden activa de la mesa', order: existingOrder });
-      }
-    }
-
-    const finalOrderType = order_type || (table_id ? 'mesa' : 'para_llevar');
-
-    // Asociar al turno de caja abierto actual
-    const activeShift = await knex('cash_registers')
-      .where({ branch_id: branchId, status: 'abierta' })
-      .orderBy('id', 'desc')
-      .first();
-
-    const [newOrder] = await knex('orders').insert({
-      business_id: businessId,
-      branch_id: branchId,
-      table_id: table_id || null,
-      cash_register_id: activeShift ? activeShift.id : null,
-      user_id,
-      guests: guests || 1,
-      notes: notes || null,
-      order_type: finalOrderType,
-      customer_id: customer_id || null,
-      delivery_address: delivery_address || null,
-      delivery_phone: delivery_phone || null,
-      delivery_notes: delivery_notes || null,
-      delivery_fee: (delivery_fee !== undefined && delivery_fee !== null) ? parseFloat(delivery_fee) : 0,
-      discount_amount: (discount_amount !== undefined && discount_amount !== null) ? parseFloat(discount_amount) : 0,
-      discount_type: discount_type || null
-    }).returning('*');
-
-    if (table_id) {
-      await knex('tables_restaurant').where({ id: table_id, business_id: businessId }).update({ status: 'ocupada' });
-    }
-
-    if (Array.isArray(req.body.items) && req.body.items.length > 0) {
-      const newItemsList = [];
-      for (const item of req.body.items) {
-        const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
-        if (prod) {
-          const modifiersVal = item.modifiers_json || item.modifiers;
-          const modifiersJson = modifiersVal ? (typeof modifiersVal === 'string' ? modifiersVal : JSON.stringify(modifiersVal)) : null;
-
-          const [inserted] = await knex('order_items').insert({
+        // Crear ticket de comanda para cocina si se indicó
+        if (req.body.send_to_kitchen && itemsForKitchen.length > 0) {
+          await trx('kitchen_tickets').insert({
+            business_id: businessId,
+            branch_id: branchId,
             order_id: newOrder.id,
-            product_id: prod.id,
-            quantity: parseInt(item.quantity, 10) || 1,
-            unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
-            tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
-            tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
-            status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
-            notes: item.notes || null,
-            modifiers_json: modifiersJson,
-            sent_to_kitchen_at: req.body.send_to_kitchen ? knex.fn.now() : null
-          }).returning('*');
+            table_number: resolvedTableDisplay,
+            items_json: JSON.stringify(itemsForKitchen)
+          });
+          await trx('orders').where('id', newOrder.id).update({ status: 'en_preparacion' });
+        }
+      }
 
-          let modsText = '';
-          if (modifiersJson) {
-            try {
-              const parsed = JSON.parse(modifiersJson);
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
-              }
-            } catch (e) {}
-          }
-
-          newItemsList.push({
-            name: prod.name,
-            quantity: inserted.quantity,
-            notes: inserted.notes,
-            modifiers: modsText || undefined
+      // Si es domicilio y se pasó conductor/zona, crear asignación de delivery
+      if (finalOrderType === 'delivery') {
+        if (delivery_driver_id) {
+          await trx('delivery_assignments').insert({
+            order_id: newOrder.id,
+            driver_user_id: parseInt(delivery_driver_id, 10),
+            delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
+            status: 'asignado'
           });
         }
       }
+    });
 
-      // Crear ticket de comanda para cocina si se indicó
-      if (req.body.send_to_kitchen && newItemsList.length > 0) {
-        const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
-        await knex('kitchen_tickets').insert({
-          business_id: businessId,
-          branch_id: branchId,
-          order_id: newOrder.id,
-          table_number: tableDisplay,
-          items_json: JSON.stringify(newItemsList)
-        });
-        await knex('orders').where('id', newOrder.id).update({ status: 'en_preparacion' });
-      }
-    }
-
-    // Si es domicilio y se pasó conductor/zona, crear asignación de delivery
-    if (finalOrderType === 'delivery') {
-      if (delivery_driver_id) {
-        await knex('delivery_assignments').insert({
-          order_id: newOrder.id,
-          driver_user_id: parseInt(delivery_driver_id, 10),
-          delivery_zone_id: delivery_zone_id ? parseInt(delivery_zone_id, 10) : null,
-          status: 'asignado'
-        });
-      }
-    }
-
-    if (req.app && req.app.locals && req.app.locals.io) {
-      const io = req.app.locals.io;
-      io.to(`branch:${branchId}`).emit('order:created', { order_id: newOrder.id });
-      if (finalOrderType === 'delivery') {
-        io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: newOrder.id });
-        if (delivery_driver_id) {
-          io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: newOrder.id, driver_user_id: delivery_driver_id });
+    // Emisión segura de Socket.IO tras el commit de la transacción
+    if (req.app && req.app.locals && req.app.locals.io && finalOrder) {
+      try {
+        const io = req.app.locals.io;
+        if (isNewOrder) {
+          io.to(`branch:${branchId}`).emit('order:created', { order_id: finalOrder.id });
+          if (finalOrderType === 'delivery') {
+            io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: finalOrder.id });
+            if (delivery_driver_id) {
+              io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: finalOrder.id, driver_user_id: delivery_driver_id });
+            }
+          }
+        } else {
+          io.to(`branch:${branchId}`).emit('order:updated', { order_id: finalOrder.id });
         }
-      }
-      if (req.body.send_to_kitchen && newItemsList.length > 0) {
-        const tableDisplay = table_id ? `Mesa ${table_id}` : (finalOrderType === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
-        const ticketPayload = {
-          order_id: newOrder.id,
-          business_id: businessId,
-          branch_id: branchId,
-          table_number: tableDisplay,
-          items: newItemsList,
-          notes: notes || '',
-          waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
-          order_type: finalOrderType,
-          created_at: new Date().toISOString()
-        };
-        io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+
+        if (table_id) {
+          io.to(`branch:${branchId}`).emit('table:status-changed', { table_id, status: 'ocupada' });
+        }
+
+        if (req.body.send_to_kitchen && itemsForKitchen.length > 0) {
+          const ticketPayload = {
+            order_id: finalOrder.id,
+            business_id: businessId,
+            branch_id: branchId,
+            table_number: resolvedTableDisplay,
+            items: itemsForKitchen,
+            notes: notes || finalOrder.notes || '',
+            waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
+            order_type: finalOrderType,
+            created_at: new Date().toISOString()
+          };
+          io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+        }
+      } catch (socketErr) {
+        console.warn('[SocketIO] Error al emitir eventos de orden:', socketErr.message);
       }
     }
 
-    res.status(201).json({ id: newOrder.id, message: 'Orden creada exitosamente', order: newOrder });
+    const statusCode = isNewOrder ? 201 : 200;
+    const msg = isNewOrder ? 'Orden creada exitosamente' : 'Ítems incorporados a la orden activa de la mesa';
+    return res.status(statusCode).json({ id: finalOrder.id, message: msg, order: finalOrder });
   } catch (err) {
     console.error('Error al crear orden:', err);
-    res.status(500).json({ error: 'Error al crear la orden' });
+    return res.status(500).json({ error: err.message || 'Error al crear la orden' });
   }
 };
 

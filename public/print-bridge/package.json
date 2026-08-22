@@ -1,0 +1,11 @@
+{
+  "name": "kamia-print-bridge",
+  "version": "2.0.0",
+  "description": "Servidor de Impresión Térmica Silenciosa Directa (ESC/POS) para KAMIA POS",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "author": "KAMIA by JF",
+  "license": "ISC"
+}

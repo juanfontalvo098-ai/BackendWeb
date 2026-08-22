@@ -72,8 +72,9 @@ app.use(helmet({
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 
-// Servir estáticos para imágenes subidas
+// Servir estáticos para imágenes subidas y agente print-bridge
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/print-bridge', express.static(path.join(__dirname, 'public/print-bridge')));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,

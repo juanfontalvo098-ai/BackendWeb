@@ -260,7 +260,7 @@ exports.create = async (req, res) => {
                 table_number: tableDisplay,
                 items: newItemsList,
                 notes: existingOrder.notes || '',
-                waiter_name: user?.full_name || user?.name || 'Personal',
+                waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
                 order_type: 'mesa',
                 created_at: new Date().toISOString()
               };
@@ -390,7 +390,7 @@ exports.create = async (req, res) => {
           table_number: tableDisplay,
           items: newItemsList,
           notes: notes || '',
-          waiter_name: user?.full_name || user?.name || 'Personal',
+          waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
           order_type: finalOrderType,
           created_at: new Date().toISOString()
         };
@@ -618,7 +618,7 @@ exports.updateOrder = async (req, res) => {
           table_number: tableDisplay,
           items: itemsJson,
           notes: order.notes || '',
-          waiter_name: user?.full_name || user?.name || 'Personal',
+          waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
           order_type: order.order_type,
           created_at: new Date().toISOString()
         };
@@ -846,7 +846,7 @@ exports.sendToKitchen = async (req, res) => {
         table_number: tableDisplay,
         items: itemsJson,
         notes: order.notes || '',
-        waiter_name: user?.full_name || user?.name || 'Personal',
+        waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
         order_type: order.order_type,
         created_at: new Date().toISOString()
       };

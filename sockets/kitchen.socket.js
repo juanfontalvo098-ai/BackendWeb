@@ -1,7 +1,6 @@
 /**
  * Kitchen Socket — Multi-tenant
- * Rooms por sucursal para aislar la comunicación en tiempo real
- * Formato de rooms: branch:{branchId}
+ * Rooms por sucursal y por negocio para comunicación en tiempo real
  */
 const jwt = require('jsonwebtoken');
 
@@ -21,46 +20,39 @@ module.exports = function(io) {
 
   io.on('connection', (socket) => {
     const { username, role, branchId, businessId } = socket.user;
-    console.log(`Usuario conectado: ${username} (${role}) — Sucursal: ${branchId || 'global'}`);
+    console.log(`Usuario conectado a Socket: ${username} (${role}) — Negocio: ${businessId || 'global'} — Sucursal: ${branchId || 'global'}`);
 
-    // Unir a rooms de la sucursal activa
-    if (branchId) {
-      socket.join(`branch:${branchId}`);
+    // 1. Unir SIEMPRE al room del negocio
+    if (businessId) {
+      socket.join(`business:${businessId}`);
     }
 
-    // Roles específicos se unen a rooms adicionales dentro de su sucursal
-    if (role === 'cocinero' && branchId) {
+    // 2. Unir a rooms de la sucursal activa
+    if (branchId) {
+      socket.join(`branch:${branchId}`);
       socket.join(`kitchen:${branchId}`);
-    } else if (role === 'mesero' && branchId) {
       socket.join(`service:${branchId}`);
-    } else if (role === 'admin' || role === 'super_admin') {
-      // Admin se une a todas las rooms de sus sucursales
+    }
+
+    // 3. Roles específicos y administradores
+    if (role === 'admin' || role === 'super_admin' || role === 'gerente') {
       const branchIds = socket.user.branchIds || [];
       branchIds.forEach(bid => {
         socket.join(`branch:${bid}`);
         socket.join(`kitchen:${bid}`);
         socket.join(`service:${bid}`);
       });
-      // También la sucursal activa
-      if (branchId) {
-        socket.join(`kitchen:${branchId}`);
-        socket.join(`service:${branchId}`);
-      }
-    } else if (role === 'cajero' && branchId) {
-      socket.join(`service:${branchId}`);
     }
 
-    // Permitir cambio de sucursal en tiempo real (para admin)
+    // Permitir cambio de sucursal en tiempo real
     socket.on('switch-branch', (data) => {
       const { newBranchId } = data;
       if (newBranchId && (role === 'admin' || role === 'super_admin' || role === 'gerente')) {
-        // Dejar rooms de la sucursal anterior
         if (branchId) {
           socket.leave(`branch:${branchId}`);
           socket.leave(`kitchen:${branchId}`);
           socket.leave(`service:${branchId}`);
         }
-        // Unir a las nuevas rooms
         socket.join(`branch:${newBranchId}`);
         socket.join(`kitchen:${newBranchId}`);
         socket.join(`service:${newBranchId}`);
@@ -74,6 +66,9 @@ module.exports = function(io) {
       if (targetBranch) {
         io.to(`service:${targetBranch}`).emit('kitchen:update-status', data);
       }
+      if (businessId) {
+        io.to(`business:${businessId}`).emit('kitchen:update-status', data);
+      }
     });
 
     socket.on('kitchen:ticket-ready', (data) => {
@@ -81,10 +76,13 @@ module.exports = function(io) {
       if (targetBranch) {
         io.to(`service:${targetBranch}`).emit('kitchen:ticket-ready', data);
       }
+      if (businessId) {
+        io.to(`business:${businessId}`).emit('kitchen:ticket-ready', data);
+      }
     });
 
     socket.on('disconnect', () => {
-      console.log(`Usuario desconectado: ${username}`);
+      console.log(`Usuario desconectado de Socket: ${username}`);
     });
   });
 };

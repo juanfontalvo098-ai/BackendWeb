@@ -4,6 +4,22 @@
  */
 const knex = require('../database/knex');
 
+function emitToBranchAndBusiness(io, branchId, businessId, event, data) {
+  if (!io) return;
+  try {
+    if (branchId) {
+      io.to(`branch:${branchId}`).emit(event, data);
+      io.to(`kitchen:${branchId}`).emit(event, data);
+      io.to(`service:${branchId}`).emit(event, data);
+    }
+    if (businessId) {
+      io.to(`business:${businessId}`).emit(event, data);
+    }
+  } catch (e) {
+    console.warn(`[SocketIO] Error emit ${event}:`, e.message);
+  }
+}
+
 exports.getAll = async (req, res) => {
   try {
     const { businessId, branchId, isGlobalScope } = req.tenant;
@@ -368,19 +384,19 @@ exports.create = async (req, res) => {
       try {
         const io = req.app.locals.io;
         if (isNewOrder) {
-          io.to(`branch:${branchId}`).emit('order:created', { order_id: finalOrder.id });
+          emitToBranchAndBusiness(io, branchId, businessId, 'order:created', { order_id: finalOrder.id });
           if (finalOrderType === 'delivery') {
-            io.to(`branch:${branchId}`).emit('delivery:status-changed', { order_id: finalOrder.id });
+            emitToBranchAndBusiness(io, branchId, businessId, 'delivery:status-changed', { order_id: finalOrder.id });
             if (delivery_driver_id) {
-              io.to(`branch:${branchId}`).emit('delivery:assigned', { order_id: finalOrder.id, driver_user_id: delivery_driver_id });
+              emitToBranchAndBusiness(io, branchId, businessId, 'delivery:assigned', { order_id: finalOrder.id, driver_user_id: delivery_driver_id });
             }
           }
         } else {
-          io.to(`branch:${branchId}`).emit('order:updated', { order_id: finalOrder.id });
+          emitToBranchAndBusiness(io, branchId, businessId, 'order:updated', { order_id: finalOrder.id });
         }
 
         if (table_id) {
-          io.to(`branch:${branchId}`).emit('table:status-changed', { table_id, status: 'ocupada' });
+          emitToBranchAndBusiness(io, branchId, businessId, 'table:status-changed', { table_id, status: 'ocupada' });
         }
 
         if (req.body.send_to_kitchen && itemsForKitchen.length > 0) {
@@ -395,7 +411,7 @@ exports.create = async (req, res) => {
             order_type: finalOrderType,
             created_at: new Date().toISOString()
           };
-          io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+          emitToBranchAndBusiness(io, branchId, businessId, 'kitchen:new-ticket', ticketPayload);
         }
       } catch (socketErr) {
         console.warn('[SocketIO] Error al emitir eventos de orden:', socketErr.message);
@@ -459,9 +475,9 @@ exports.addItems = async (req, res) => {
 
     if (req.app && req.app.locals && req.app.locals.io) {
       const branchId = order.branch_id;
-      req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
+      emitToBranchAndBusiness(req.app.locals.io, branchId, businessId, 'order:updated', { order_id: id });
       if (order.table_id) {
-        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'ocupada' });
+        emitToBranchAndBusiness(req.app.locals.io, branchId, businessId, 'table:status-changed', { table_id: order.table_id, status: 'ocupada' });
       }
     }
 
@@ -606,7 +622,7 @@ exports.updateOrder = async (req, res) => {
 
     if (req.app && req.app.locals && req.app.locals.io) {
       const io = req.app.locals.io;
-      io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
+      emitToBranchAndBusiness(io, order.branch_id, businessId, 'order:updated', { order_id: id });
       if (send_to_kitchen && newlyAddedItems.length > 0) {
         const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
         const itemsJson = newlyAddedItems.map(i => ({
@@ -626,7 +642,7 @@ exports.updateOrder = async (req, res) => {
           order_type: order.order_type,
           created_at: new Date().toISOString()
         };
-        io.to(`branch:${order.branch_id}`).emit('kitchen:new-ticket', ticketPayload);
+        emitToBranchAndBusiness(io, order.branch_id, businessId, 'kitchen:new-ticket', ticketPayload);
       }
     }
 
@@ -648,164 +664,162 @@ exports.updateOrder = async (req, res) => {
     res.json({ message: 'Orden actualizada exitosamente', order: updatedOrder });
   } catch (err) {
     console.error('Error al actualizar orden:', err);
-    res.status(500).json({ error: 'Error al actualizar orden', details: err.message });
+    res.status(500).json({ error: 'Error al actualizar la orden: ' + err.message });
   }
 };
 
 exports.removeItem = async (req, res) => {
+  const { id, itemId } = req.params;
   const { businessId } = req.tenant;
+
   try {
     const item = await knex('order_items as oi')
       .join('orders as o', 'oi.order_id', 'o.id')
-      .select('oi.*', 'o.table_id', 'o.status as order_status', 'o.branch_id')
-      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .where({ 'oi.id': itemId, 'o.id': id, 'o.business_id': businessId })
+      .select('oi.*', 'o.branch_id', 'o.table_id')
       .first();
 
-    if (!item) return res.json({ message: 'Ítem no encontrado' });
+    if (!item) {
+      return res.status(404).json({ error: 'Ítem no encontrado en esta orden' });
+    }
 
-    await knex('order_items')
-      .where({ id: req.params.itemId })
-      .del();
+    await knex('order_items').where('id', itemId).del();
+    await knex('orders').where('id', id).update({ updated_at: knex.fn.now() });
 
-    const remainingCount = await knex('order_items')
-      .where('order_id', item.order_id)
-      .count('id as count')
-      .first();
-
-    if (parseInt(remainingCount.count) === 0 && item.order_status === 'abierta' && item.table_id) {
-      await knex('tables_restaurant').where('id', item.table_id).update({ status: 'libre' });
-      if (req.app && req.app.locals && req.app.locals.io) {
-        req.app.locals.io.to(`branch:${item.branch_id}`).emit('table:status-changed', {
-          table_id: item.table_id, status: 'libre'
-        });
+    // Verificar si quedan ítems
+    const remainingItems = await knex('order_items').where('order_id', id);
+    if (remainingItems.length === 0) {
+      if (item.table_id) {
+        await knex('tables_restaurant').where('id', item.table_id).update({ status: 'libre' });
+        if (req.app && req.app.locals && req.app.locals.io) {
+          emitToBranchAndBusiness(req.app.locals.io, item.branch_id, businessId, 'table:status-changed', {
+            table_id: item.table_id, status: 'libre'
+          });
+        }
       }
     }
 
-    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
-
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+      emitToBranchAndBusiness(req.app.locals.io, item.branch_id, businessId, 'order:updated', { order_id: item.order_id });
     }
 
-    res.json({ message: 'Ítem eliminado de la comanda' });
+    res.json({ message: 'Ítem eliminado de la orden' });
   } catch (err) {
-    console.error('Error al eliminar ítem:', err);
-    res.status(500).json({ error: 'Error al eliminar ítem' });
+    res.status(500).json({ error: err.message || 'Error al eliminar ítem' });
   }
 };
 
 exports.updateItemQuantity = async (req, res) => {
+  const { id, itemId } = req.params;
   const { quantity } = req.body;
   const { businessId } = req.tenant;
+
   try {
     const item = await knex('order_items as oi')
       .join('orders as o', 'oi.order_id', 'o.id')
+      .where({ 'oi.id': itemId, 'o.id': id, 'o.business_id': businessId })
       .select('oi.*', 'o.branch_id')
-      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
       .first();
 
-    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
-
-    const newQty = parseInt(quantity, 10);
-    if (newQty <= 0) {
-      await knex('order_items').where({ id: req.params.itemId }).del();
-    } else {
-      await knex('order_items')
-        .where({ id: req.params.itemId })
-        .update({ quantity: newQty });
+    if (!item) {
+      return res.status(404).json({ error: 'Ítem no encontrado' });
     }
 
-    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+    const qty = parseInt(quantity, 10);
+    if (isNaN(qty) || qty <= 0) {
+      return res.status(400).json({ error: 'Cantidad inválida' });
+    }
+
+    await knex('order_items').where('id', itemId).update({ quantity: qty });
+    await knex('orders').where('id', id).update({ updated_at: knex.fn.now() });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+      emitToBranchAndBusiness(req.app.locals.io, item.branch_id, businessId, 'order:updated', { order_id: item.order_id });
     }
 
     res.json({ message: 'Cantidad actualizada' });
   } catch (err) {
-    console.error('Error al actualizar cantidad:', err);
-    res.status(500).json({ error: 'Error al actualizar cantidad' });
+    res.status(500).json({ error: err.message || 'Error al actualizar cantidad' });
   }
 };
 
 exports.updateItemPrice = async (req, res) => {
+  const { id, itemId } = req.params;
   const { unit_price } = req.body;
   const { businessId } = req.tenant;
+
   try {
     const item = await knex('order_items as oi')
       .join('orders as o', 'oi.order_id', 'o.id')
-      .join('products as p', 'oi.product_id', 'p.id')
-      .select('oi.*', 'p.price as catalog_price', 'o.branch_id')
-      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
+      .where({ 'oi.id': itemId, 'o.id': id, 'o.business_id': businessId })
+      .select('oi.*', 'o.branch_id')
       .first();
 
-    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
-
-    const newPrice = parseFloat(unit_price);
-    const catalogPrice = parseFloat(item.catalog_price || 0);
-
-    if (isNaN(newPrice) || newPrice < catalogPrice) {
-      return res.status(400).json({ error: `El precio no puede ser menor al precio de catálogo (${catalogPrice})` });
+    if (!item) {
+      return res.status(404).json({ error: 'Ítem no encontrado' });
     }
 
-    await knex('order_items')
-      .where({ id: req.params.itemId })
-      .update({ unit_price: newPrice });
+    const price = parseFloat(unit_price);
+    if (isNaN(price) || price < 0) {
+      return res.status(400).json({ error: 'Precio unitario inválido' });
+    }
 
-    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
+    await knex('order_items').where('id', itemId).update({ unit_price: price });
+    await knex('orders').where('id', id).update({ updated_at: knex.fn.now() });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+      emitToBranchAndBusiness(req.app.locals.io, item.branch_id, businessId, 'order:updated', { order_id: item.order_id });
     }
 
-    res.json({ message: 'Precio especial actualizado exitosamente' });
+    res.json({ message: 'Precio actualizado exitosamente' });
   } catch (err) {
-    console.error('Error al actualizar precio:', err);
-    res.status(500).json({ error: 'Error al actualizar precio del producto' });
+    res.status(500).json({ error: err.message || 'Error al actualizar precio' });
   }
 };
 
 exports.updateItemNotes = async (req, res) => {
+  const { id, itemId } = req.params;
   const { notes } = req.body;
   const { businessId } = req.tenant;
+
   try {
     const item = await knex('order_items as oi')
       .join('orders as o', 'oi.order_id', 'o.id')
+      .where({ 'oi.id': itemId, 'o.id': id, 'o.business_id': businessId })
       .select('oi.*', 'o.branch_id')
-      .where({ 'oi.id': req.params.itemId, 'o.business_id': businessId })
       .first();
 
-    if (!item) return res.status(404).json({ error: 'Ítem no encontrado' });
-
-    await knex('order_items')
-      .where({ id: req.params.itemId })
-      .update({ notes: notes || null });
-
-    await knex('orders').where('id', req.params.id || item.order_id).update({ updated_at: knex.fn.now() });
-
-    if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${item.branch_id}`).emit('order:updated', { order_id: item.order_id });
+    if (!item) {
+      return res.status(404).json({ error: 'Ítem no encontrado' });
     }
 
-    res.json({ message: 'Nota actualizada exitosamente' });
+    await knex('order_items').where('id', itemId).update({ notes: notes || null });
+    await knex('orders').where('id', id).update({ updated_at: knex.fn.now() });
+
+    if (req.app && req.app.locals && req.app.locals.io) {
+      emitToBranchAndBusiness(req.app.locals.io, item.branch_id, businessId, 'order:updated', { order_id: item.order_id });
+    }
+
+    res.json({ message: 'Notas actualizadas exitosamente' });
   } catch (err) {
-    console.error('Error al actualizar nota:', err);
-    res.status(500).json({ error: 'Error al actualizar nota del producto' });
+    res.status(500).json({ error: err.message || 'Error al actualizar notas' });
   }
 };
 
 exports.sendToKitchen = async (req, res) => {
   const { id } = req.params;
-  const { businessId } = req.tenant;
+  const { businessId, branchId } = req.tenant;
 
   try {
     const order = await knex('orders as o')
       .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
-      .select('o.*', 't.table_number')
       .where({ 'o.id': id, 'o.business_id': businessId })
+      .select('o.*', 't.table_number')
       .first();
 
-    if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
+    if (!order) {
+      return res.status(404).json({ error: 'Orden no encontrada' });
+    }
 
     const pendingItems = await knex('order_items as oi')
       .join('products as p', 'oi.product_id', 'p.id')
@@ -839,12 +853,11 @@ exports.sendToKitchen = async (req, res) => {
     });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      const branchId = order.branch_id;
       const io = req.app.locals.io;
       const ticketPayload = {
         order_id: id, 
         business_id: businessId,
-        branch_id: branchId,
+        branch_id: order.branch_id,
         table_number: tableDisplay,
         items: itemsJson,
         notes: order.notes || '',
@@ -852,14 +865,14 @@ exports.sendToKitchen = async (req, res) => {
         order_type: order.order_type,
         created_at: new Date().toISOString()
       };
-      io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
+      emitToBranchAndBusiness(io, order.branch_id, businessId, 'kitchen:new-ticket', ticketPayload);
 
       if (order.table_id) {
-        io.to(`branch:${branchId}`).emit('table:status-changed', {
+        emitToBranchAndBusiness(io, order.branch_id, businessId, 'table:status-changed', {
           table_id: order.table_id, status: 'ocupada'
         });
       }
-      io.to(`branch:${branchId}`).emit('order:updated', { order_id: id });
+      emitToBranchAndBusiness(io, order.branch_id, businessId, 'order:updated', { order_id: id });
     }
 
     res.json({ message: 'Comanda enviada a cocina exitosamente' });

@@ -265,8 +265,6 @@ exports.create = async (req, res) => {
                 created_at: new Date().toISOString()
               };
               io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
-              io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
-              io.emit('kitchen:new-ticket', ticketPayload);
             }
           }
         }
@@ -395,8 +393,6 @@ exports.create = async (req, res) => {
           created_at: new Date().toISOString()
         };
         io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
-        io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
-        io.emit('kitchen:new-ticket', ticketPayload);
       }
     }
 
@@ -623,8 +619,6 @@ exports.updateOrder = async (req, res) => {
           created_at: new Date().toISOString()
         };
         io.to(`branch:${order.branch_id}`).emit('kitchen:new-ticket', ticketPayload);
-        io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
-        io.emit('kitchen:new-ticket', ticketPayload);
       }
     }
 
@@ -851,8 +845,6 @@ exports.sendToKitchen = async (req, res) => {
         created_at: new Date().toISOString()
       };
       io.to(`branch:${branchId}`).emit('kitchen:new-ticket', ticketPayload);
-      io.to(`business:${businessId}`).emit('kitchen:new-ticket', ticketPayload);
-      io.emit('kitchen:new-ticket', ticketPayload);
 
       if (order.table_id) {
         io.to(`branch:${branchId}`).emit('table:status-changed', {

@@ -495,6 +495,7 @@ exports.updateOrder = async (req, res) => {
     if (order.status === 'cerrada') return res.status(400).json({ error: 'No se puede modificar una orden que ya está cerrada y facturada' });
     if (order.status === 'cancelada') return res.status(400).json({ error: 'No se puede modificar una orden cancelada' });
 
+    let newlyAddedItems = [];
     await knex.transaction(async (trx) => {
       const updateData = { updated_at: trx.fn.now() };
       if (customer_id !== undefined) updateData.customer_id = customer_id || null;
@@ -524,7 +525,6 @@ exports.updateOrder = async (req, res) => {
         }
 
         // 2. Actualizar o insertar ítems
-        const newlyAddedItems = [];
         for (const item of items) {
           if (item.id) {
             // Actualizar existente

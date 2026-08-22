@@ -19,7 +19,6 @@ exports.getSettings = async (req, res) => {
     if (!settings) {
       settings = await knex('settings')
         .where({ business_id: businessId })
-        .whereNull('branch_id')
         .first();
     }
 
@@ -29,17 +28,28 @@ exports.getSettings = async (req, res) => {
 
       const [newSettings] = await knex('settings').insert({
         business_id: businessId,
-        branch_id: null,
+        branch_id: branchId || null,
         business_name: biz ? biz.name : 'Mi Negocio POS',
         nit: biz?.nit || '',
         address: '',
         phone: '',
-        receipt_footer: '¡Gracias por su compra! Vuelva pronto.',
+        receipt_footer: '¡Gracias por su preferencia!',
         default_paper_width: '80mm',
-        logo_url: biz?.logo_url || ''
+        logo_url: biz?.logo_url || '',
+        enable_silent_printing: false,
+        auto_print_kitchen_tickets: true,
+        auto_print_invoices: false,
+        open_drawer_on_payment: true,
+        silent_print_bridge_url: 'http://localhost:8182',
+        printer_kitchen_name: '',
+        printer_receipt_name: '',
+        printer_bar_name: ''
       }).returning('*');
       settings = newSettings;
     }
+
+    // Normalizar campos para compatibilidad
+    settings.paper_width = settings.default_paper_width || '80mm';
 
     res.json(settings);
   } catch (err) {
@@ -49,47 +59,46 @@ exports.getSettings = async (req, res) => {
 };
 
 exports.updateSettings = async (req, res) => {
-  const { business_name, nit, address, phone, receipt_footer, logo_url, default_paper_width } = req.body;
   const { businessId, branchId } = req.tenant;
 
   try {
-    // Determinar si actualizar config global o de sucursal
+    const isBool = (val, defaultVal = false) => {
+      if (val === undefined || val === null) return defaultVal;
+      return val === true || val === 1 || val === 'true' || val === '1';
+    };
+
     const targetBranchId = req.body.branch_specific ? branchId : null;
 
-    const existing = await knex('settings')
-      .where({ business_id: businessId })
-      .andWhere(function() {
-        if (targetBranchId) {
-          this.where('branch_id', targetBranchId);
-        } else {
-          this.whereNull('branch_id');
-        }
-      })
-      .first();
-
     const settingsData = {
-      business_name: business_name || 'GastrosPOS Enterprise',
-      nit: nit || '',
-      address: address || '',
-      phone: phone || '',
-      receipt_footer: receipt_footer || '¡Gracias por su compra!',
-      logo_url: logo_url || '',
-      default_paper_width: default_paper_width || '80mm',
+      business_name: req.body.business_name || 'GastrosPOS Enterprise',
+      nit: req.body.nit || '',
+      address: req.body.address || '',
+      phone: req.body.phone || '',
+      receipt_footer: req.body.receipt_footer || '¡Gracias por su compra!',
+      logo_url: req.body.logo_url || '',
+      default_paper_width: req.body.default_paper_width || req.body.paper_width || '80mm',
       tax_regime: req.body.tax_regime || 'impoconsumo',
-      print_tax_regime: req.body.print_tax_regime !== undefined ? (req.body.print_tax_regime === true || req.body.print_tax_regime === 1 || req.body.print_tax_regime === 'true') : true,
+      print_tax_regime: isBool(req.body.print_tax_regime, true),
       custom_tax_regime_text: req.body.custom_tax_regime_text || '',
       economic_activity_code: req.body.economic_activity_code || '',
       invoice_prefix: req.body.invoice_prefix ? req.body.invoice_prefix.trim().toUpperCase() : 'FAC',
-      enable_silent_printing: req.body.enable_silent_printing !== undefined ? !!req.body.enable_silent_printing : false,
-      auto_print_kitchen_tickets: req.body.auto_print_kitchen_tickets !== undefined ? !!req.body.auto_print_kitchen_tickets : true,
-      auto_print_invoices: req.body.auto_print_invoices !== undefined ? !!req.body.auto_print_invoices : false,
-      silent_print_bridge_url: req.body.silent_print_bridge_url || 'http://localhost:8182',
-      printer_kitchen_name: req.body.printer_kitchen_name || '',
-      printer_receipt_name: req.body.printer_receipt_name || ''
+      enable_silent_printing: isBool(req.body.enable_silent_printing, false),
+      auto_print_kitchen_tickets: isBool(req.body.auto_print_kitchen_tickets, true),
+      auto_print_invoices: isBool(req.body.auto_print_invoices, false),
+      open_drawer_on_payment: isBool(req.body.open_drawer_on_payment, true),
+      silent_print_bridge_url: req.body.silent_print_bridge_url ? req.body.silent_print_bridge_url.trim() : 'http://localhost:8182',
+      printer_kitchen_name: req.body.printer_kitchen_name ? req.body.printer_kitchen_name.trim() : '',
+      printer_receipt_name: req.body.printer_receipt_name ? req.body.printer_receipt_name.trim() : '',
+      printer_bar_name: req.body.printer_bar_name ? req.body.printer_bar_name.trim() : ''
     };
 
+    // Actualizar todas las filas de este negocio o insertar si no existe
+    const existing = await knex('settings').where({ business_id: businessId }).first();
+
     if (existing) {
-      await knex('settings').where('id', existing.id).update(settingsData);
+      await knex('settings')
+        .where({ business_id: businessId })
+        .update(settingsData);
     } else {
       await knex('settings').insert({
         business_id: businessId,
@@ -98,9 +107,15 @@ exports.updateSettings = async (req, res) => {
       });
     }
 
-    res.json({ message: 'Configuración del negocio actualizada exitosamente' });
+    // Retornar la configuración recién actualizada
+    const updated = await knex('settings').where({ business_id: businessId }).first();
+    if (updated) {
+      updated.paper_width = updated.default_paper_width || '80mm';
+    }
+
+    res.json({ message: 'Configuración guardada exitosamente', settings: updated });
   } catch (err) {
     console.error('Error al guardar configuración:', err);
-    res.status(500).json({ error: 'Error al guardar la configuración del negocio' });
+    res.status(500).json({ error: 'Error al guardar la configuración del negocio: ' + err.message });
   }
 };

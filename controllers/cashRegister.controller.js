@@ -32,8 +32,15 @@ exports.open = async (req, res) => {
     }).returning('*');
 
     if (req.app?.locals?.io) {
-      req.app.locals.io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'abierta', register });
-      req.app.locals.io.to(`branch:${branchId}`).emit('cash:opened', register);
+      const io = req.app.locals.io;
+      if (branchId) {
+        io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'abierta', register });
+        io.to(`branch:${branchId}`).emit('cash:opened', register);
+      }
+      if (businessId) {
+        io.to(`business:${businessId}`).emit('cash:status-changed', { status: 'abierta', register });
+        io.to(`business:${businessId}`).emit('cash:opened', register);
+      }
     }
 
     res.status(201).json({ id: register.id, message: 'Caja abierta exitosamente', register });
@@ -295,8 +302,15 @@ exports.close = async (req, res) => {
     }
 
     if (req.app?.locals?.io) {
-      req.app.locals.io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'cerrada', register_id: register.id });
-      req.app.locals.io.to(`branch:${branchId}`).emit('cash:closed', { register_id: register.id });
+      const io = req.app.locals.io;
+      if (branchId) {
+        io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'cerrada', register_id: register.id });
+        io.to(`branch:${branchId}`).emit('cash:closed', { register_id: register.id });
+      }
+      if (businessId) {
+        io.to(`business:${businessId}`).emit('cash:status-changed', { status: 'cerrada', register_id: register.id });
+        io.to(`business:${businessId}`).emit('cash:closed', { register_id: register.id });
+      }
     }
 
     res.json({

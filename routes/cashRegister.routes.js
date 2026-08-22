@@ -9,7 +9,7 @@ router.use(auth);
 router.use(tenantMiddleware);
 
 router.post('/open', rbac('super_admin', 'cajero', 'admin', 'gerente'), cashRegisterController.open);
-router.get('/current', rbac('super_admin', 'cajero', 'admin', 'gerente'), cashRegisterController.getCurrent);
+router.get('/current', cashRegisterController.getCurrent);
 router.get('/summary', rbac('super_admin', 'cajero', 'admin', 'gerente'), cashRegisterController.getShiftSummary);
 router.post('/movement', rbac('super_admin', 'cajero', 'admin', 'gerente'), cashRegisterController.addMovement);
 router.post('/movements', rbac('super_admin', 'cajero', 'admin', 'gerente'), cashRegisterController.addMovement);

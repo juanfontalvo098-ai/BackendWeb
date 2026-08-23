@@ -9,10 +9,7 @@ function emitToBranchAndBusiness(io, branchId, businessId, event, data) {
   try {
     if (branchId) {
       io.to(`branch:${branchId}`).emit(event, data);
-      io.to(`kitchen:${branchId}`).emit(event, data);
-      io.to(`service:${branchId}`).emit(event, data);
-    }
-    if (businessId) {
+    } else if (businessId) {
       io.to(`business:${businessId}`).emit(event, data);
     }
   } catch (e) {
@@ -762,6 +759,14 @@ exports.updateItemPrice = async (req, res) => {
     const price = parseFloat(unit_price);
     if (isNaN(price) || price < 0) {
       return res.status(400).json({ error: 'Precio unitario inválido' });
+    }
+
+    // Validar que solo se pueda modificar a un precio superior o igual al precio de catálogo
+    const prod = await knex('products').where({ id: item.product_id, business_id: businessId }).first();
+    if (prod && price < parseFloat(prod.price)) {
+      return res.status(400).json({
+        error: `Solo se permite modificar el precio hacia arriba. El precio base de catálogo es $${parseFloat(prod.price).toLocaleString('es-CO')}`
+      });
     }
 
     await knex('order_items').where('id', itemId).update({ unit_price: price });

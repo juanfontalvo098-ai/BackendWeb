@@ -119,15 +119,25 @@ exports.getShiftSummary = async (req, res) => {
     if (!register) return res.status(404).json({ error: 'No hay caja abierta' });
 
     const invoices = await knex('invoices')
-      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'total')
+      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'total', 'cash_amount', 'transfer_amount', 'card_amount')
       .where('cash_register_id', register.id);
 
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0, totalTips = 0;
 
     invoices.forEach(inv => {
       totalTips += parseFloat(inv.tip_amount || 0);
-      const total = parseFloat(inv.total);
-      if (inv.payment_method === 'efectivo') cashSales += total;
+      const total = parseFloat(inv.total || 0);
+      const cAmt = parseFloat(inv.cash_amount || 0);
+      const tAmt = parseFloat(inv.transfer_amount || 0);
+      const kAmt = parseFloat(inv.card_amount || 0);
+
+      if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
+        cashSales += cAmt;
+        transferSales += tAmt;
+        cardSales += kAmt;
+        const rem = total - (cAmt + tAmt + kAmt);
+        if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
+      } else if (inv.payment_method === 'efectivo') cashSales += total;
       else if (inv.payment_method === 'tarjeta') cardSales += total;
       else if (inv.payment_method === 'transferencia') transferSales += total;
       else if (inv.payment_method === 'credito') creditSales += total;
@@ -140,7 +150,7 @@ exports.getShiftSummary = async (req, res) => {
 
     let cashInflows = 0, cashOutflows = 0, cashRefunds = 0;
     movements.forEach(m => {
-      const amt = parseFloat(m.amount);
+      const amt = parseFloat(m.amount || 0);
       if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
       if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
       if (m.type === 'devolucion' && m.payment_method === 'efectivo') cashRefunds += amt;
@@ -185,7 +195,7 @@ exports.getShiftSummary = async (req, res) => {
 };
 
 exports.close = async (req, res) => {
-  const { closing_amount } = req.body;
+  const { closing_amount, declared_transfers } = req.body;
   const { businessId, branchId } = req.tenant;
 
   try {
@@ -196,7 +206,7 @@ exports.close = async (req, res) => {
     // Obtener facturas con detalles
     const invoices = await knex('invoices as i')
       .join('orders as o', 'i.order_id', 'o.id')
-      .join('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .join('users as u', 'o.user_id', 'u.id')
       .select('i.*', 'o.table_id', 't.table_number', 'u.full_name as waiter_name')
       .where('i.cash_register_id', register.id);
@@ -205,12 +215,22 @@ exports.close = async (req, res) => {
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0;
 
     invoices.forEach(inv => {
-      grossRevenue += parseFloat(inv.total);
-      netRevenue += parseFloat(inv.subtotal);
-      taxTotal += parseFloat(inv.tax_total);
+      grossRevenue += parseFloat(inv.total || 0);
+      netRevenue += parseFloat(inv.subtotal || 0);
+      taxTotal += parseFloat(inv.tax_total || 0);
       totalTips += parseFloat(inv.tip_amount || 0);
-      const total = parseFloat(inv.total);
-      if (inv.payment_method === 'efectivo') cashSales += total;
+      const total = parseFloat(inv.total || 0);
+      const cAmt = parseFloat(inv.cash_amount || 0);
+      const tAmt = parseFloat(inv.transfer_amount || 0);
+      const kAmt = parseFloat(inv.card_amount || 0);
+
+      if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
+        cashSales += cAmt;
+        transferSales += tAmt;
+        cardSales += kAmt;
+        const rem = total - (cAmt + tAmt + kAmt);
+        if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
+      } else if (inv.payment_method === 'efectivo') cashSales += total;
       else if (inv.payment_method === 'tarjeta') cardSales += total;
       else if (inv.payment_method === 'transferencia') transferSales += total;
       else if (inv.payment_method === 'credito') creditSales += total;
@@ -223,20 +243,28 @@ exports.close = async (req, res) => {
 
     let cashInflows = 0, cashOutflows = 0, cashRefunds = 0;
     movements.forEach(m => {
-      const amt = parseFloat(m.amount);
+      const amt = parseFloat(m.amount || 0);
       if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
       if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
       if (m.type === 'devolucion' && m.payment_method === 'efectivo') cashRefunds += amt;
     });
 
-    const expected = (parseFloat(register.opening_amount) + cashSales + cashInflows) - (cashOutflows + cashRefunds);
-    const difference = closing_amount - expected;
+    const initialFloat = parseFloat(register.opening_amount || 0);
+    const expected = (initialFloat + cashSales + cashInflows) - (cashOutflows + cashRefunds);
+    
+    const declaredCashVal = parseFloat(closing_amount || 0);
+    const diffCash = declaredCashVal - expected;
+    const hasDeclaredTransfers = declared_transfers !== undefined && declared_transfers !== null && declared_transfers !== '';
+    const declaredTransfersVal = hasDeclaredTransfers ? parseFloat(declared_transfers) : null;
+    const diffTransfers = hasDeclaredTransfers ? (declaredTransfersVal - transferSales) : 0;
+    const totalDifference = diffCash + diffTransfers;
 
     // Actualizar caja
     await knex('cash_registers').where('id', register.id).update({
-      closing_amount,
+      closing_amount: declaredCashVal,
+      declared_transfers: declaredTransfersVal,
       expected_amount: expected,
-      difference,
+      difference: totalDifference,
       status: 'cerrada',
       closed_at: knex.fn.now()
     });
@@ -266,7 +294,38 @@ exports.close = async (req, res) => {
         knex.raw('AVG(oi.unit_price) as unit_price')
       );
 
-    const snapshot = { invoices, itemizedSales, movements };
+    const snapshot = {
+      invoices,
+      itemizedSales,
+      movements,
+      initialFloat,
+      openingAmount: initialFloat,
+      opening_amount: initialFloat,
+      cashSales,
+      cardSales,
+      transferSales,
+      creditSales,
+      cashInflows,
+      cashOutflows,
+      cashRefunds,
+      expectedCash: expected,
+      expected_amount: expected,
+      declaredCash: declaredCashVal,
+      closing_amount: declaredCashVal,
+      declaredTransfers: declaredTransfersVal,
+      difference: totalDifference,
+      differenceCash: diffCash,
+      differenceTransfers: diffTransfers,
+      totalTips,
+      grossRevenue,
+      netRevenue,
+      taxTotal,
+      totalVoids,
+      audit: {
+        canceledOrdersCount: parseInt(voidRow?.canceled_orders_count || 0),
+        canceledAmount: totalVoids
+      }
+    };
 
     const hour = new Date().getHours();
     const shiftName = hour < 15 ? 'Jornada Mañana' : 'Jornada Tarde / Noche';
@@ -282,9 +341,10 @@ exports.close = async (req, res) => {
         opened_at: register.opened_at,
         closed_at: knex.fn.now(),
         opening_amount: register.opening_amount,
-        closing_amount,
+        closing_amount: declaredCashVal,
+        declared_transfers: declaredTransfersVal,
         expected_amount: expected,
-        difference,
+        difference: totalDifference,
         gross_revenue: grossRevenue,
         net_revenue: netRevenue,
         tax_total: taxTotal,
@@ -316,9 +376,14 @@ exports.close = async (req, res) => {
     res.json({
       message: 'Caja cerrada y Reporte Z guardado exitosamente',
       expected,
-      difference,
-      opening_amount: parseFloat(register.opening_amount || 0),
-      openingAmount: parseFloat(register.opening_amount || 0)
+      difference: totalDifference,
+      differenceCash: diffCash,
+      differenceTransfers: diffTransfers,
+      opening_amount: initialFloat,
+      openingAmount: initialFloat,
+      declaredCash: declaredCashVal,
+      declaredTransfers: declaredTransfersVal,
+      snapshot
     });
   } catch (err) {
     console.error('Error al cerrar caja:', err);
@@ -344,13 +409,23 @@ exports.getReport = async (req, res) => {
     // Calcular ventas por método de pago para este turno
     const invoices = await knex('invoices')
       .where('cash_register_id', id)
-      .select('payment_method', 'total', 'tip_amount');
+      .select('payment_method', 'total', 'tip_amount', 'cash_amount', 'transfer_amount', 'card_amount');
 
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0, totalTips = 0;
     invoices.forEach(inv => {
       const tot = parseFloat(inv.total || 0);
       totalTips += parseFloat(inv.tip_amount || 0);
-      if (inv.payment_method === 'efectivo' || !inv.payment_method) cashSales += tot;
+      const cAmt = parseFloat(inv.cash_amount || 0);
+      const tAmt = parseFloat(inv.transfer_amount || 0);
+      const kAmt = parseFloat(inv.card_amount || 0);
+
+      if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
+        cashSales += cAmt;
+        transferSales += tAmt;
+        cardSales += kAmt;
+        const rem = tot - (cAmt + tAmt + kAmt);
+        if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
+      } else if (inv.payment_method === 'efectivo' || !inv.payment_method) cashSales += tot;
       else if (inv.payment_method === 'tarjeta') cardSales += tot;
       else if (inv.payment_method === 'transferencia') transferSales += tot;
       else if (inv.payment_method === 'credito') creditSales += tot;

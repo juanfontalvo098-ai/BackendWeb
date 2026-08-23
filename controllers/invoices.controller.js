@@ -269,6 +269,21 @@ exports.create = async (req, res) => {
       existingInv = await knex('invoices').where({ business_id: businessId, invoice_number }).first();
     }
 
+    const parsedCash = parseFloat(req.body.cash_amount || 0);
+    const parsedTransfer = parseFloat(req.body.transfer_amount || 0);
+    const parsedCard = parseFloat(req.body.card_amount || 0);
+    const parsedTendered = parseFloat(req.body.amount_tendered || 0);
+    const parsedChange = parseFloat(req.body.change_given || 0);
+
+    const isMixed = payment_method === 'mixto' || (parsedCash > 0 && (parsedTransfer > 0 || parsedCard > 0));
+    const effectivePaymentMethod = isMixed 
+      ? (parsedCreditAmount > 0 ? 'mixto + crédito' : 'mixto')
+      : (parsedCreditAmount > 0 && parsedAmountPaid > 0 ? `${payment_method} + crédito` : payment_method);
+
+    const finalCashAmount = isMixed ? parsedCash : (payment_method === 'efectivo' ? parsedAmountPaid : 0);
+    const finalTransferAmount = isMixed ? parsedTransfer : (payment_method === 'transferencia' ? parsedAmountPaid : 0);
+    const finalCardAmount = isMixed ? parsedCard : (payment_method === 'tarjeta' ? parsedAmountPaid : 0);
+
     const invoiceId = await knex.transaction(async (trx) => {
       const [invoiceInfo] = await trx('invoices').insert({
         business_id: businessId,
@@ -284,13 +299,46 @@ exports.create = async (req, res) => {
         discount_amount: parsedDiscount,
         delivery_fee: parsedDeliveryFee,
         total,
-        payment_method: parsedCreditAmount > 0 && parsedAmountPaid > 0 ? `${payment_method} + crédito` : payment_method,
+        payment_method: effectivePaymentMethod,
+        cash_amount: finalCashAmount,
+        transfer_amount: finalTransferAmount,
+        card_amount: finalCardAmount,
+        amount_tendered: parsedTendered,
+        change_given: parsedChange,
         invoice_number,
         notes: notes || null
       }).returning('*');
 
-      // 1. Movimiento de caja si hubo abono/pago inmediato en efectivo/tarjeta/transferencia
-      if (parsedAmountPaid > 0 && payment_method !== 'credito') {
+      // 1. Movimientos de caja si hubo abono/pago inmediato
+      if (isMixed) {
+        if (finalCashAmount > 0) {
+          await trx('cash_movements').insert({
+            cash_register_id: register.id,
+            type: 'venta',
+            amount: finalCashAmount,
+            payment_method: 'efectivo',
+            description: `Factura ${invoice_number} (Pago Mixto - Efectivo)`
+          });
+        }
+        if (finalTransferAmount > 0) {
+          await trx('cash_movements').insert({
+            cash_register_id: register.id,
+            type: 'venta',
+            amount: finalTransferAmount,
+            payment_method: 'transferencia',
+            description: `Factura ${invoice_number} (Pago Mixto - Transferencia)`
+          });
+        }
+        if (finalCardAmount > 0) {
+          await trx('cash_movements').insert({
+            cash_register_id: register.id,
+            type: 'venta',
+            amount: finalCardAmount,
+            payment_method: 'tarjeta',
+            description: `Factura ${invoice_number} (Pago Mixto - Tarjeta)`
+          });
+        }
+      } else if (parsedAmountPaid > 0 && payment_method !== 'credito') {
         await trx('cash_movements').insert({
           cash_register_id: register.id,
           type: 'venta',

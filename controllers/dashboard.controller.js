@@ -8,11 +8,14 @@ const knex = require('../database/knex');
 exports.getMetrics = async (req, res) => {
   try {
     const { businessId, branchId, isGlobalScope } = req.tenant;
-    const { period, startDate, endDate } = req.query;
+    const { period, startDate, endDate, shift_id, cash_register_id } = req.query;
+    const targetShiftId = shift_id || cash_register_id ? parseInt(shift_id || cash_register_id, 10) : null;
 
-    // Helper: construir condición de fecha para PostgreSQL
-    const addDateFilter = (query, dateCol) => {
-      if (period === 'yesterday') {
+    // Helper: construir condición de fecha o turno para PostgreSQL
+    const addDateFilter = (query, dateCol, invAlias = 'i') => {
+      if (targetShiftId) {
+        query.where(`${invAlias}.cash_register_id`, targetShiftId);
+      } else if (period === 'yesterday') {
         query.whereRaw(`DATE(${dateCol}) = CURRENT_DATE - INTERVAL '1 day'`);
       } else if (period === 'last7') {
         query.whereRaw(`DATE(${dateCol}) >= CURRENT_DATE - INTERVAL '7 days'`);
@@ -35,6 +38,37 @@ exports.getMetrics = async (req, res) => {
       }
     };
 
+    // Si se filtró por un turno específico, consultar su información
+    let selectedShiftInfo = null;
+    if (targetShiftId) {
+      selectedShiftInfo = await knex('shift_reports')
+        .where({ cash_register_id: targetShiftId, business_id: businessId })
+        .first();
+
+      if (!selectedShiftInfo) {
+        const reg = await knex('cash_registers as cr')
+          .leftJoin('users as u', 'cr.user_id', 'u.id')
+          .where({ 'cr.id': targetShiftId, 'cr.business_id': businessId })
+          .select('cr.*', 'u.full_name as user_name')
+          .first();
+
+        if (reg) {
+          selectedShiftInfo = {
+            id: reg.id,
+            cash_register_id: reg.id,
+            user_name: reg.user_name || 'Cajero',
+            shift_name: 'Turno en Curso (Abierto)',
+            opened_at: reg.opened_at,
+            closed_at: reg.closed_at,
+            opening_amount: parseFloat(reg.opening_amount || 0),
+            closing_amount: reg.closing_amount ? parseFloat(reg.closing_amount) : null,
+            difference: reg.difference ? parseFloat(reg.difference) : null,
+            status: reg.status
+          };
+        }
+      }
+    }
+
     // 1. Hero KPIs (facturas)
     let kpiQuery = knex('invoices as i')
       .select(
@@ -48,7 +82,7 @@ exports.getMetrics = async (req, res) => {
         knex.raw('COALESCE(AVG(i.total), 0) as avg_ticket')
       );
     addBranchFilter(kpiQuery, 'i');
-    addDateFilter(kpiQuery, 'i.created_at');
+    addDateFilter(kpiQuery, 'i.created_at', 'i');
     const heroKpis = await kpiQuery.first();
 
     // Ocupación de Mesas
@@ -85,7 +119,7 @@ exports.getMetrics = async (req, res) => {
       .groupBy('i.payment_method')
       .orderBy('total', 'desc');
     addBranchFilter(paymentQuery, 'i');
-    addDateFilter(paymentQuery, 'i.created_at');
+    addDateFilter(paymentQuery, 'i.created_at', 'i');
     const payments = await paymentQuery;
 
     // 4. Canales de Venta (Order Types: Mesa, Domicilio, Para Llevar)
@@ -99,7 +133,7 @@ exports.getMetrics = async (req, res) => {
       .groupBy('channel')
       .orderBy('total', 'desc');
     addBranchFilter(channelsQuery, 'i');
-    addDateFilter(channelsQuery, 'i.created_at');
+    addDateFilter(channelsQuery, 'i.created_at', 'i');
     const channels = await channelsQuery;
 
     // Void Tracking
@@ -111,7 +145,14 @@ exports.getMetrics = async (req, res) => {
         knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as total')
       );
     addBranchFilter(voidQuery, 'o');
-    addDateFilter(voidQuery, 'o.created_at');
+    if (targetShiftId) {
+      voidQuery.andWhere(function() {
+        this.where('o.cash_register_id', targetShiftId)
+          .orWhereRaw("DATE(o.created_at) = CURRENT_DATE");
+      });
+    } else {
+      addDateFilter(voidQuery, 'o.created_at', 'o');
+    }
     const voidTracking = await voidQuery.first();
 
     // 5. Product Analytics
@@ -129,7 +170,7 @@ exports.getMetrics = async (req, res) => {
       .limit(6);
     topQuery.where('i.business_id', businessId);
     if (branchId && !isGlobalScope) topQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(topQuery, 'i.created_at');
+    addDateFilter(topQuery, 'i.created_at', 'i');
     const topProducts = await topQuery;
 
     let worstQuery = knex('products as p')
@@ -162,7 +203,7 @@ exports.getMetrics = async (req, res) => {
       .groupBy('c.id', 'c.name')
       .orderBy('total_sales', 'desc');
     if (branchId && !isGlobalScope) catQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(catQuery, 'i.created_at');
+    addDateFilter(catQuery, 'i.created_at', 'i');
     const categoryBreakdown = await catQuery;
 
     // 6. Staff Performance (Leaderboard)
@@ -182,7 +223,7 @@ exports.getMetrics = async (req, res) => {
       .limit(6);
     staffQuery.where('i.business_id', businessId);
     if (branchId && !isGlobalScope) staffQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(staffQuery, 'i.created_at');
+    addDateFilter(staffQuery, 'i.created_at', 'i');
     const staffPerformance = await staffQuery;
 
     // 7. Hourly Sales Trend
@@ -196,7 +237,7 @@ exports.getMetrics = async (req, res) => {
       .orderBy('hour');
     hourlyQuery.where('i.business_id', businessId);
     if (branchId && !isGlobalScope) hourlyQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(hourlyQuery, 'i.created_at');
+    addDateFilter(hourlyQuery, 'i.created_at', 'i');
     const hourlySales = await hourlyQuery;
 
     // 8. Tendencia Diaria (para períodos multiescala como last7, month, custom)
@@ -212,7 +253,7 @@ exports.getMetrics = async (req, res) => {
       .orderBy('date', 'asc');
     dailyQuery.where('i.business_id', businessId);
     if (branchId && !isGlobalScope) dailyQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(dailyQuery, 'i.created_at');
+    addDateFilter(dailyQuery, 'i.created_at', 'i');
     const dailySales = await dailyQuery;
 
     // 9. Top Clientes del Período
@@ -232,7 +273,7 @@ exports.getMetrics = async (req, res) => {
       .orderBy('total_spent', 'desc')
       .limit(5);
     if (branchId && !isGlobalScope) topCustomersQuery.andWhere('i.branch_id', branchId);
-    addDateFilter(topCustomersQuery, 'i.created_at');
+    addDateFilter(topCustomersQuery, 'i.created_at', 'i');
     const topCustomers = await topCustomersQuery;
 
     // 10. Alertas de Stock Bajo (Insumos o Productos)
@@ -273,14 +314,17 @@ exports.getMetrics = async (req, res) => {
       if (openRegister) {
         const invoices = await knex('invoices')
           .where({ cash_register_id: openRegister.id })
-          .select('payment_method', 'total', 'tip_amount');
+          .select('payment_method', 'total', 'tip_amount', 'cash_amount', 'transfer_amount', 'card_amount');
 
         let shiftCashSales = 0;
         let shiftTotalSales = 0;
         invoices.forEach(inv => {
           const tot = parseFloat(inv.total || 0);
           shiftTotalSales += tot;
-          if (inv.payment_method === 'efectivo' || !inv.payment_method) {
+          const cAmt = parseFloat(inv.cash_amount || 0);
+          if (cAmt > 0) {
+            shiftCashSales += cAmt;
+          } else if (inv.payment_method === 'efectivo' || !inv.payment_method) {
             shiftCashSales += tot;
           }
         });
@@ -319,7 +363,9 @@ exports.getMetrics = async (req, res) => {
     }
 
     res.json({
-      period: period || 'today',
+      period: targetShiftId ? `shift_${targetShiftId}` : (period || 'today'),
+      targetShiftId,
+      selectedShiftInfo,
       kpis: {
         gross_sales: parseFloat(heroKpis.gross_sales || 0),
         net_sales: parseFloat(heroKpis.net_sales || 0),

@@ -47,25 +47,39 @@ exports.getById = async (req, res) => {
   }
 };
 
+// Helper para normalizar el número de documento: si está vacío o es un número genérico de consumidor final (22222222...), se guarda como null
+const normalizeDocNumber = (doc) => {
+  if (doc === null || doc === undefined) return null;
+  const trimmed = doc.toString().trim();
+  if (!trimmed) return null;
+  // Si es un identificador genérico de consumidor final (ej. 222222222222, 22222222, etc.) o 'Consumidor Final'
+  if (/^2{6,}$/.test(trimmed) || /^consumidor\s*final$/i.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+};
+
 exports.create = async (req, res) => {
   try {
     const { businessId } = req.tenant;
     const { name, document_type, document_number, email, phone, address, city, notes, customer_type, credit_limit } = req.body;
 
-    if (!name) return res.status(400).json({ error: 'El nombre es requerido' });
+    if (!name || !name.trim()) return res.status(400).json({ error: 'El nombre es requerido' });
+
+    const cleanDoc = normalizeDocNumber(document_number);
 
     const [customer] = await knex('customers').insert({
       business_id: businessId,
-      name,
+      name: name.trim(),
       document_type: document_type || 'CC',
-      document_number: document_number || null,
-      email: email || null,
-      phone: phone || null,
-      address: address || null,
-      city: city || null,
-      notes: notes || null,
+      document_number: cleanDoc,
+      email: email ? email.trim() : null,
+      phone: phone ? phone.trim() : null,
+      address: address ? address.trim() : null,
+      city: city ? city.trim() : null,
+      notes: notes ? notes.trim() : null,
       customer_type: customer_type || 'regular',
-      credit_limit: credit_limit || 0
+      credit_limit: parseFloat(credit_limit) || 0
     }).returning('*');
 
     res.status(201).json(customer);
@@ -89,16 +103,16 @@ exports.update = async (req, res) => {
     const { name, document_type, document_number, email, phone, address, city, notes, customer_type, credit_limit, is_active } = req.body;
 
     const updateData = { updated_at: knex.fn.now() };
-    if (name !== undefined) updateData.name = name;
+    if (name !== undefined) updateData.name = name.trim();
     if (document_type !== undefined) updateData.document_type = document_type;
-    if (document_number !== undefined) updateData.document_number = document_number || null;
-    if (email !== undefined) updateData.email = email || null;
-    if (phone !== undefined) updateData.phone = phone || null;
-    if (address !== undefined) updateData.address = address || null;
-    if (city !== undefined) updateData.city = city || null;
-    if (notes !== undefined) updateData.notes = notes || null;
+    if (document_number !== undefined) updateData.document_number = normalizeDocNumber(document_number);
+    if (email !== undefined) updateData.email = email ? email.trim() : null;
+    if (phone !== undefined) updateData.phone = phone ? phone.trim() : null;
+    if (address !== undefined) updateData.address = address ? address.trim() : null;
+    if (city !== undefined) updateData.city = city ? city.trim() : null;
+    if (notes !== undefined) updateData.notes = notes ? notes.trim() : null;
     if (customer_type !== undefined) updateData.customer_type = customer_type;
-    if (credit_limit !== undefined) updateData.credit_limit = parseFloat(credit_limit);
+    if (credit_limit !== undefined) updateData.credit_limit = parseFloat(credit_limit) || 0;
     if (is_active !== undefined) updateData.is_active = Boolean(is_active);
 
     await knex('customers').where({ id, business_id: businessId }).update(updateData);

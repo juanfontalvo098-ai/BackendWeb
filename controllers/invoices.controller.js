@@ -14,6 +14,10 @@ exports.getAll = async (req, res) => {
       .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
+        'o.order_type as order_type',
+        'o.delivery_address as delivery_address',
+        'o.delivery_phone as delivery_phone',
+        'o.delivery_notes as delivery_notes',
         'u_cashier.full_name as cashier_name',
         'u_waiter.full_name as waiter_name',
         't.table_number',
@@ -65,6 +69,10 @@ exports.getById = async (req, res) => {
       .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
+        'o.order_type as order_type',
+        'o.delivery_address as delivery_address',
+        'o.delivery_phone as delivery_phone',
+        'o.delivery_notes as delivery_notes',
         'u_cashier.full_name as cashier_name',
         'u_waiter.full_name as waiter_name',
         't.table_number',
@@ -111,7 +119,10 @@ exports.getPrintFormat = async (req, res) => {
       .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
-        'o.order_type',
+        'o.order_type as order_type',
+        'o.delivery_address as delivery_address',
+        'o.delivery_phone as delivery_phone',
+        'o.delivery_notes as delivery_notes',
         'u_cashier.full_name as cashier_name',
         'u_waiter.full_name as waiter_name',
         't.table_number',
@@ -524,6 +535,10 @@ exports.create = async (req, res) => {
       .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
       .select(
         'i.*',
+        'o.order_type as order_type',
+        'o.delivery_address as delivery_address',
+        'o.delivery_phone as delivery_phone',
+        'o.delivery_notes as delivery_notes',
         'u_cashier.full_name as cashier_name',
         'u_waiter.full_name as waiter_name',
         't.table_number',

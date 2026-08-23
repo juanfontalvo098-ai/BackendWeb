@@ -321,7 +321,7 @@ exports.create = async (req, res) => {
               order_id: newOrder.id,
               product_id: prod.id,
               quantity: parseInt(item.quantity, 10) || 1,
-              unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
+              unit_price: item.unit_price !== undefined ? Math.max(parseFloat(prod.price), parseFloat(item.unit_price)) : parseFloat(prod.price),
               tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
               tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
               status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',

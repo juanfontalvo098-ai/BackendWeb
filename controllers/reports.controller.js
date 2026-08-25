@@ -715,18 +715,29 @@ exports.reorderShifts = async (req, res) => {
     const { businessId } = req.tenant;
 
     await knex.raw(`
-      -- Eliminar cualquier caja huérfana temporal que no tenga reporte asociado
-      DELETE FROM cash_registers WHERE id = 2 AND id NOT IN (SELECT cash_register_id FROM shift_reports);
+      SET session_replication_role = 'replica';
 
-      UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      -- 1. Unificar Turno 1 (Jornada Mañana - 23 de Agosto en la mañana)
+      UPDATE cash_registers SET id = 1 WHERE id IN (1, 2) AND opened_at < '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
+      UPDATE shift_reports SET id = 1, cash_register_id = 1 WHERE opened_at < '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
+      UPDATE orders SET cash_register_id = 1 WHERE cash_register_id IN (1, 2) AND business_id = '${businessId}';
+      UPDATE invoices SET cash_register_id = 1 WHERE cash_register_id IN (1, 2) AND business_id = '${businessId}';
+      UPDATE cash_movements SET cash_register_id = 1 WHERE cash_register_id IN (1, 2);
+
+      -- 2. Unificar Turno 2 (Jornada Tarde / Noche - 23 de Agosto en la noche)
+      UPDATE cash_registers SET id = 2 WHERE id IN (2, 3) AND opened_at >= '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
+      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE opened_at >= '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
       UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
       UPDATE cash_movements SET cash_register_id = 2 WHERE cash_register_id = 3;
-      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}';
-      UPDATE cash_registers SET id = 2 WHERE id = 3 AND business_id = '${businessId}';
 
-      DELETE FROM shift_reports WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
+      -- 3. Limpiar registros sobrantes
       DELETE FROM cash_registers WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
+      DELETE FROM shift_reports WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
 
+      SET session_replication_role = 'origin';
+
+      -- 4. Ajustar secuencias
       SELECT setval('cash_registers_id_seq', 2);
       SELECT setval('shift_reports_id_seq', 2);
     `);

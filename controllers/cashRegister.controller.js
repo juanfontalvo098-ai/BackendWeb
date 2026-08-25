@@ -81,6 +81,8 @@ exports.getCurrent = async (req, res) => {
   }
 };
 
+const { createJournalEntryForCashMovement } = require('./accounting.controller');
+
 exports.addMovement = async (req, res) => {
   const { type, amount, payment_method, description } = req.body;
   const { businessId, branchId } = req.tenant;
@@ -97,6 +99,15 @@ exports.addMovement = async (req, res) => {
       payment_method: payment_method || 'efectivo',
       description: description || null
     }).returning('*');
+
+    // Registrar automáticamente el asiento contable en el Libro Diario
+    try {
+      if (['egreso', 'retiro', 'gasto', 'ingreso'].includes(type)) {
+        await createJournalEntryForCashMovement(knex, movement, businessId, branchId, req.user?.id || register.user_id);
+      }
+    } catch (accErr) {
+      console.error('Error al registrar asiento contable para movimiento de caja:', accErr);
+    }
 
     if (req.app?.locals?.io) {
       req.app.locals.io.to(`branch:${branchId}`).emit('cash:movement-added', movement);

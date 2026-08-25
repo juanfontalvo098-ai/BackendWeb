@@ -19,6 +19,7 @@ router.post('/accounts/initialize', authorizeRoles('super_admin', 'admin'), ctrl
 router.get('/journal', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getJournalEntries);
 router.post('/journal', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.createJournalEntry);
 router.post('/journal/:id/approve', authorizeRoles('super_admin', 'admin'), ctrl.approveJournalEntry);
+router.post('/sync-movements', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.syncCashMovementsToJournal);
 
 // Libro mayor
 router.get('/ledger', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getLedger);

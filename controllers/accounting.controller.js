@@ -1156,3 +1156,159 @@ exports.exportAccountingExcel = async (req, res) => {
   }
 };
 
+// ==================== GENERACIÓN AUTOMÁTICA DE ASIENTOS POR EGRESOS/INGRESOS DE CAJA ====================
+
+const createJournalEntryForCashMovement = async (db, movement, businessId, branchId, userId) => {
+  const amt = parseFloat(movement.amount || 0);
+  if (amt <= 0) return null;
+
+  // Buscar cuentas en chart_of_accounts
+  const cajaAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '1.1.01' })
+    .first() || await db('chart_of_accounts').where({ business_id: businessId, account_type: 'activo' }).first();
+
+  const bancosAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '1.1.02' })
+    .first() || cajaAccount;
+
+  const costOfSalesAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '5.1.01' })
+    .first();
+
+  const payrollExpenseAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '5.1.02' })
+    .first();
+
+  const generalExpenseAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '5.1.05' })
+    .first() || await db('chart_of_accounts').where({ business_id: businessId, account_type: 'gasto' }).first();
+
+  const generalIncomeAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '4.1.01' })
+    .first() || await db('chart_of_accounts').where({ business_id: businessId, account_type: 'ingreso' }).first();
+
+  if (!cajaAccount) return null;
+
+  const descLower = (movement.description || '').toLowerCase();
+  const paymentMethod = (movement.payment_method || 'efectivo').toLowerCase();
+  const assetAccount = (paymentMethod === 'transferencia' || paymentMethod === 'tarjeta') ? bancosAccount : cajaAccount;
+
+  let expenseAccount = generalExpenseAccount;
+  if (descLower.includes('nomina') || descLower.includes('nómina') || descLower.includes('sueldo') || descLower.includes('emplead') || descLower.includes('jornal')) {
+    expenseAccount = payrollExpenseAccount || generalExpenseAccount;
+  } else if (descLower.includes('insumo') || descLower.includes('materia') || descLower.includes('ingrediente') || descLower.includes('compra')) {
+    expenseAccount = costOfSalesAccount || generalExpenseAccount;
+  }
+
+  const count = await db('journal_entries').where('business_id', businessId).count('id as c').first();
+  const entryDate = movement.created_at ? new Date(movement.created_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+
+  if (movement.type === 'egreso' || movement.type === 'retiro' || movement.type === 'gasto') {
+    const entryNum = `AST-EGR-${String(parseInt(count.c) + 1).padStart(6, '0')}`;
+    const [jEntry] = await db('journal_entries').insert({
+      business_id: businessId,
+      branch_id: branchId || null,
+      entry_number: entryNum,
+      entry_date: entryDate,
+      description: `Egreso de Caja: ${movement.description || 'Salida de efectivo'}`,
+      reference_type: 'cash_movement',
+      reference_id: movement.id,
+      status: 'aprobado',
+      user_id: userId || 6
+    }).returning('*');
+
+    // Débito a cuenta de gasto
+    await db('journal_entry_lines').insert({
+      journal_entry_id: jEntry.id,
+      account_id: expenseAccount ? expenseAccount.id : cajaAccount.id,
+      debit: amt,
+      credit: 0,
+      description: `Gasto por ${movement.description || 'Egreso de caja'}`
+    });
+
+    // Crédito a Caja / Bancos
+    await db('journal_entry_lines').insert({
+      journal_entry_id: jEntry.id,
+      account_id: assetAccount.id,
+      debit: 0,
+      credit: amt,
+      description: `Salida de efectivo (${paymentMethod})`
+    });
+
+    return jEntry;
+  } else if (movement.type === 'ingreso') {
+    const entryNumIng = `AST-ING-${String(parseInt(count.c) + 1).padStart(6, '0')}`;
+    const [jEntry] = await db('journal_entries').insert({
+      business_id: businessId,
+      branch_id: branchId || null,
+      entry_number: entryNumIng,
+      entry_date: entryDate,
+      description: `Ingreso de Caja: ${movement.description || 'Entrada de efectivo'}`,
+      reference_type: 'cash_movement',
+      reference_id: movement.id,
+      status: 'aprobado',
+      user_id: userId || 6
+    }).returning('*');
+
+    // Débito a Caja / Bancos
+    await db('journal_entry_lines').insert({
+      journal_entry_id: jEntry.id,
+      account_id: assetAccount.id,
+      debit: amt,
+      credit: 0,
+      description: `Entrada de efectivo (${paymentMethod})`
+    });
+
+    // Crédito a Ingresos
+    await db('journal_entry_lines').insert({
+      journal_entry_id: jEntry.id,
+      account_id: generalIncomeAccount.id,
+      debit: 0,
+      credit: amt,
+      description: `Ingreso por ${movement.description || 'Entrada adicional'}`
+    });
+
+    return jEntry;
+  }
+  return null;
+};
+
+exports.createJournalEntryForCashMovement = createJournalEntryForCashMovement;
+
+exports.syncCashMovementsToJournal = async (req, res) => {
+  try {
+    const { businessId, branchId } = req.tenant;
+    const userId = req.user?.id || 6;
+
+    // Obtener todos los movimientos de tipo egreso, retiro, gasto o ingreso
+    const movements = await knex('cash_movements as cm')
+      .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
+      .where('cr.business_id', businessId)
+      .whereIn('cm.type', ['egreso', 'retiro', 'gasto', 'ingreso'])
+      .select('cm.*', 'cr.branch_id', 'cr.user_id as cashier_id')
+      .orderBy('cm.created_at', 'asc');
+
+    let createdCount = 0;
+    for (const mov of movements) {
+      const existing = await knex('journal_entries')
+        .where({
+          business_id: businessId,
+          reference_type: 'cash_movement',
+          reference_id: mov.id
+        })
+        .first();
+
+      if (!existing) {
+        await createJournalEntryForCashMovement(knex, mov, businessId, mov.branch_id || branchId, mov.cashier_id || userId);
+        createdCount++;
+      }
+    }
+
+    res.json({ message: `Sincronización completada. ${createdCount} asientos contables de egresos/ingresos generados.`, createdCount });
+  } catch (err) {
+    console.error('Error al sincronizar movimientos de caja con contabilidad:', err);
+    res.status(500).json({ error: 'Error al sincronizar movimientos con el libro diario' });
+  }
+};
+
+

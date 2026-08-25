@@ -1284,6 +1284,18 @@ exports.syncCashMovementsToJournal = async (req, res) => {
       }
     }
 
+    // Asegurar que los asientos de nómina apunten a 5.1.02 Gastos de Personal y no a pasivos
+    const payrollExpenseAcc = await knex('chart_of_accounts').where({ business_id: businessId, code: '5.1.02' }).first();
+    if (payrollExpenseAcc) {
+      const payrollEntryIds = (await knex('journal_entries').where({ business_id: businessId, reference_type: 'payroll' }).select('id')).map(x => x.id);
+      if (payrollEntryIds.length > 0) {
+        await knex('journal_entry_lines')
+          .whereIn('journal_entry_id', payrollEntryIds)
+          .andWhere('debit', '>', 0)
+          .update({ account_id: payrollExpenseAcc.id });
+      }
+    }
+
     res.json({ message: `Sincronización completada. ${createdCount} asientos contables de egresos/ingresos generados.`, createdCount });
   } catch (err) {
     console.error('Error al sincronizar movimientos de caja con contabilidad:', err);

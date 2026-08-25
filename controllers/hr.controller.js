@@ -17,21 +17,10 @@ async function syncPayrollToAccounting(businessId, branchId, payrollEntry, userI
     const emp = await knex('employees').where('id', payrollEntry.employee_id).first();
     const empName = emp ? `${emp.first_name} ${emp.last_name}` : `Empleado #${payrollEntry.employee_id}`;
 
-    // 1. Obtener o crear cuenta de Gasto de Personal (5.1.02)
+    // 1. Obtener cuenta de Gasto de Personal (5.1.02)
     let expenseAccount = await knex('chart_of_accounts')
-      .where({ business_id: businessId })
-      .where(function() {
-        this.where('code', '5.1.02')
-          .orWhere('name', 'ilike', '%nómina%')
-          .orWhere('name', 'ilike', '%personal%');
-      })
-      .first();
-
-    if (!expenseAccount) {
-      expenseAccount = await knex('chart_of_accounts')
-        .where({ business_id: businessId, account_type: 'gasto' })
-        .first();
-    }
+      .where({ business_id: businessId, code: '5.1.02' })
+      .first() || await knex('chart_of_accounts').where({ business_id: businessId, account_type: 'gasto' }).first();
 
     // 2. Obtener o crear cuenta de Caja General / Bancos (1.1.01)
     let cashAccount = await knex('chart_of_accounts')

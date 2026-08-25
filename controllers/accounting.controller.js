@@ -274,72 +274,7 @@ exports.getBalanceSheet = async (req, res) => {
 
     const totalInventoryValue = (prodInv?.total_products_cost || 0) + (supInv?.total_supplies_cost || 0);
 
-    // 3. Efectivo en Cajas Registradoras (Cajas abiertas + movimientos netos)
-    const cashReg = await knex('cash_registers as cr')
-      .where('cr.business_id', businessId)
-      .andWhere('cr.status', 'abierta')
-      .select(knex.raw('COALESCE(SUM(cr.opening_amount), 0)::float as opening'))
-      .first();
-
-    const cashMovs = await knex('cash_movements as cm')
-      .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
-      .where('cr.business_id', businessId)
-      .andWhere('cr.status', 'abierta')
-      .select(
-        knex.raw('COALESCE(SUM(CASE WHEN cm.type IN (\'venta\', \'ingreso\') THEN cm.amount WHEN cm.type IN (\'gasto\', \'retiro\') THEN -cm.amount ELSE 0 END), 0)::float as net_movs')
-      )
-      .first();
-
-    const totalCashInRegisters = Math.max(0, (cashReg?.opening || 0) + (cashMovs?.net_movs || 0));
-
-    // 4. Ventas Pagadas por Medios Electrónicos / Bancos
-    const electronicSales = await knex('invoices')
-      .where('business_id', businessId)
-      .whereIn('payment_method', ['tarjeta', 'transferencia', 'nequi', 'daviplata'])
-      .whereRaw('DATE(created_at) <= ?', [dateFilter])
-      .select(knex.raw('COALESCE(SUM(total), 0)::float as total_electronic'))
-      .first();
-
-    const totalBanks = electronicSales?.total_electronic || 0;
-
-    // 5. Cartera de Clientes / Cuentas por Cobrar (CxC)
-    const arData = await knex('accounts_receivable')
-      .where('business_id', businessId)
-      .whereIn('status', ['pendiente', 'parcial'])
-      .whereRaw('due_date <= ? OR created_at <= ?', [dateFilter, `${dateFilter} 23:59:59`])
-      .select(knex.raw('COALESCE(SUM(balance), 0)::float as total_ar'))
-      .first();
-
-    const totalAR = arData?.total_ar || 0;
-
-    // 6. Cuentas por Pagar Proveedores (CxP)
-    const apData = await knex('accounts_payable')
-      .where('business_id', businessId)
-      .whereIn('status', ['pendiente', 'parcial'])
-      .select(knex.raw('COALESCE(SUM(balance), 0)::float as total_ap'))
-      .first();
-
-    const totalAP = apData?.total_ap || 0;
-
-    // 7. Impuestos por Pagar (IVA e INC generado en facturas emitidas)
-    const taxesData = await knex('invoices')
-      .where('business_id', businessId)
-      .whereRaw('DATE(created_at) <= ?', [dateFilter])
-      .select(knex.raw('COALESCE(SUM(tax_total), 0)::float as total_tax'))
-      .first();
-
-    const totalTaxesPayable = taxesData?.total_tax || 0;
-
-    // 8. Nómina Pendiente por Pagar
-    const payrollPending = await knex('payroll')
-      .where('business_id', businessId)
-      .where('status', 'pendiente')
-      .select(knex.raw('COALESCE(SUM(net_pay), 0)::float as total_payroll_pending'))
-      .first();
-
-    const totalPayrollPending = payrollPending?.total_payroll_pending || 0;
-
-    // 9. Asientos Contables Manuales Adicionales del Libro Diario
+    // 3. Saldos del Libro Mayor
     const journalBalances = await knex('journal_entry_lines as jel')
       .join('journal_entries as je', 'jel.journal_entry_id', 'je.id')
       .join('chart_of_accounts as coa', 'jel.account_id', 'coa.id')
@@ -349,26 +284,89 @@ exports.getBalanceSheet = async (req, res) => {
       .groupBy('coa.id', 'coa.code', 'coa.name', 'coa.account_type')
       .select(
         'coa.id', 'coa.code', 'coa.name', 'coa.account_type',
-        knex.raw('SUM(jel.debit) as total_debit'),
-        knex.raw('SUM(jel.credit) as total_credit'),
-        knex.raw('SUM(jel.debit) - SUM(jel.credit) as balance')
+        knex.raw('SUM(jel.debit)::float as total_debit'),
+        knex.raw('SUM(jel.credit)::float as total_credit'),
+        knex.raw('(SUM(jel.debit) - SUM(jel.credit))::float as balance_activo'),
+        knex.raw('(SUM(jel.credit) - SUM(jel.debit))::float as balance_pasivo_patrimonio')
       )
       .orderBy('coa.code');
 
-    // Construcción estructurada del Plan y Balances
+    // 4. Ventas Pagadas por Medios Electrónicos / Bancos (1.1.02)
+    const electronicSales = await knex('invoices')
+      .where('business_id', businessId)
+      .whereIn('payment_method', ['tarjeta', 'transferencia', 'nequi', 'daviplata'])
+      .whereRaw('DATE(created_at) <= ?', [dateFilter])
+      .select(knex.raw('COALESCE(SUM(total), 0)::float as total_electronic'))
+      .first();
+
+    const totalBanks = electronicSales?.total_electronic || 0;
+
+    // 5. Efectivo en Caja General (1.1.01)
+    const cashFromJournal = journalBalances.find(b => b.code === '1.1.01');
+    let totalCashNet = cashFromJournal ? Math.max(0, parseFloat(cashFromJournal.balance_activo || 0)) : 0;
+    
+    let totalCash = totalCashNet;
+    if (totalBanks > 0 && totalCash >= totalBanks) {
+      totalCash = totalCash - totalBanks;
+    } else if (totalCash === 0) {
+      const lastRegisters = await knex('cash_registers')
+        .where('business_id', businessId)
+        .orderBy('id', 'desc')
+        .first();
+      totalCash = parseFloat(lastRegisters?.closing_amount || lastRegisters?.opening_amount || 0);
+    }
+
+    // 6. Cartera de Clientes / Cuentas por Cobrar (CxC)
+    const arData = await knex('accounts_receivable')
+      .where('business_id', businessId)
+      .whereIn('status', ['pendiente', 'parcial'])
+      .whereRaw('due_date <= ? OR created_at <= ?', [dateFilter, `${dateFilter} 23:59:59`])
+      .select(knex.raw('COALESCE(SUM(balance), 0)::float as total_ar'))
+      .first();
+
+    const totalAR = arData?.total_ar || 0;
+
+    // 7. Cuentas por Pagar Proveedores (CxP)
+    const apData = await knex('accounts_payable')
+      .where('business_id', businessId)
+      .whereIn('status', ['pendiente', 'parcial'])
+      .select(knex.raw('COALESCE(SUM(balance), 0)::float as total_ap'))
+      .first();
+
+    const totalAP = apData?.total_ap || 0;
+
+    // 8. Impuestos por Pagar (IVA e INC generado en facturas emitidas)
+    const taxesData = await knex('invoices')
+      .where('business_id', businessId)
+      .whereRaw('DATE(created_at) <= ?', [dateFilter])
+      .select(knex.raw('COALESCE(SUM(tax_total), 0)::float as total_tax'))
+      .first();
+
+    const totalTaxesPayable = taxesData?.total_tax || 0;
+
+    // 9. Nómina Pendiente por Pagar
+    const payrollPending = await knex('payroll')
+      .where('business_id', businessId)
+      .where('status', 'pendiente')
+      .select(knex.raw('COALESCE(SUM(net_pay), 0)::float as total_payroll_pending'))
+      .first();
+
+    const totalPayrollPending = payrollPending?.total_payroll_pending || 0;
+
+    // Construcción estructurada del Plan y Balances de Activos
     const activosAccounts = [
       {
         id: 'live_cash',
         code: '1.1.01',
         name: 'Caja General & Efectivo Disponible',
         account_type: 'activo',
-        balance: totalCashInRegisters,
+        balance: totalCash,
         is_live: true
       },
       {
         id: 'live_banks',
         code: '1.1.02',
-        name: 'Bancos & Medios Electrónicos',
+        name: 'Bancos & Medios Electrónicos (Transferencias / Tarjetas)',
         account_type: 'activo',
         balance: totalBanks,
         is_live: true
@@ -395,20 +393,7 @@ exports.getBalanceSheet = async (req, res) => {
       }
     ];
 
-    // Agregar cuentas manuales de activo que no sean duplicados de los automáticos
-    journalBalances.filter(b => b.account_type === 'activo').forEach(jb => {
-      if (!['1.1.01', '1.1.02', '1.1.03', '1.1.04'].includes(jb.code)) {
-        activosAccounts.push({
-          id: jb.id,
-          code: jb.code,
-          name: jb.name,
-          account_type: 'activo',
-          balance: parseFloat(jb.balance || 0),
-          is_live: false
-        });
-      }
-    });
-
+    // Cuentas de Pasivos
     const pasivosAccounts = [
       {
         id: 'live_ap',
@@ -439,48 +424,43 @@ exports.getBalanceSheet = async (req, res) => {
       });
     }
 
-    journalBalances.filter(b => b.account_type === 'pasivo').forEach(jb => {
-      if (!['2.1.01', '2.1.02', '2.1.04'].includes(jb.code)) {
-        pasivosAccounts.push({
-          id: jb.id,
-          code: jb.code,
-          name: jb.name,
-          account_type: 'pasivo',
-          balance: Math.abs(parseFloat(jb.balance || 0)),
-          is_live: false
-        });
-      }
-    });
-
     const totalActivo = activosAccounts.reduce((sum, a) => sum + (parseFloat(a.balance) || 0), 0);
     const totalPasivo = pasivosAccounts.reduce((sum, p) => sum + (parseFloat(p.balance) || 0), 0);
 
-    // Ecuación Patrimonial Fundamental:
-    // Activo = Pasivo + Patrimonio  =>  Patrimonio = Activo - Pasivo
+    // Ecuación Patrimonial Fundamental: Activo = Pasivo + Patrimonio
     const totalPatrimonio = Math.max(0, totalActivo - totalPasivo);
 
-    const patrimonioAccounts = [
-      {
-        id: 'live_retained_earnings',
-        code: '3.2',
-        name: 'Utilidades del Ejercicio (Patrimonio Neto Acumulado)',
-        account_type: 'patrimonio',
-        balance: totalPatrimonio,
-        is_live: true
-      }
-    ];
+    // Cálculo del Resultado Operacional (Ingresos - Gastos)
+    const totalIngresos = journalBalances
+      .filter(b => b.account_type === 'ingreso')
+      .reduce((s, b) => s + (parseFloat(b.balance_pasivo_patrimonio) || 0), 0);
 
-    journalBalances.filter(b => b.account_type === 'patrimonio').forEach(jb => {
-      if (jb.code !== '3.2') {
-        patrimonioAccounts.push({
-          id: jb.id,
-          code: jb.code,
-          name: jb.name,
-          account_type: 'patrimonio',
-          balance: Math.abs(parseFloat(jb.balance || 0)),
-          is_live: false
-        });
-      }
+    const totalGastos = journalBalances
+      .filter(b => b.account_type === 'gasto')
+      .reduce((s, b) => s + (parseFloat(b.balance_activo) || 0), 0);
+
+    const utilidadOperacional = Math.max(0, totalIngresos - totalGastos);
+    const capitalAportes = Math.max(0, totalPatrimonio - utilidadOperacional);
+
+    const patrimonioAccounts = [];
+    if (capitalAportes > 0) {
+      patrimonioAccounts.push({
+        id: 'live_capital',
+        code: '3.1',
+        name: 'Capital Social / Aportes Iniciales & Activos',
+        account_type: 'patrimonio',
+        balance: capitalAportes,
+        is_live: true
+      });
+    }
+
+    patrimonioAccounts.push({
+      id: 'live_retained_earnings',
+      code: '3.2',
+      name: 'Utilidades del Ejercicio (Resultado Operacional Acumulado)',
+      account_type: 'patrimonio',
+      balance: utilidadOperacional > 0 ? utilidadOperacional : totalPatrimonio,
+      is_live: true
     });
 
     res.json({

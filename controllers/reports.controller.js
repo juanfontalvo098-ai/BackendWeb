@@ -723,38 +723,56 @@ exports.reorderShifts = async (req, res) => {
 
       console.log(`Renumerando ${realShifts.length} turnos para business ${businessId}...`);
 
+      const tempBase = 9000;
+
+      // Fase 1: Mover a IDs temporales (9001, 9002...) para evitar colisiones
       for (let i = 0; i < realShifts.length; i++) {
         const oldId = realShifts[i].id;
-        const newId = i + 1; // 1, 2, 3...
+        const tempId = tempBase + i + 1;
 
-        if (oldId === newId) continue;
+        const regData = { ...realShifts[i], id: tempId };
+        await trx('cash_registers').insert(regData);
 
-        // Copiar registro con newId temporal o directo si no existe
-        const existingRegister = await trx('cash_registers').where('id', newId).first();
-        if (!existingRegister) {
-          const regData = { ...realShifts[i], id: newId };
-          await trx('cash_registers').insert(regData);
+        await trx('invoices').where('cash_register_id', oldId).update({ cash_register_id: tempId });
+        await trx('orders').where('cash_register_id', oldId).update({ cash_register_id: tempId });
+        await trx('cash_movements').where('cash_register_id', oldId).update({ cash_register_id: tempId });
 
-          // Actualizar tablas foráneas
-          await trx('invoices').where('cash_register_id', oldId).update({ cash_register_id: newId });
-          await trx('orders').where('cash_register_id', oldId).update({ cash_register_id: newId });
-          await trx('cash_movements').where('cash_register_id', oldId).update({ cash_register_id: newId });
-
-          // Actualizar shift_reports
-          const report = await trx('shift_reports').where('cash_register_id', oldId).first();
-          if (report) {
-            const oldReportId = report.id;
-            await trx('shift_reports').where('id', oldReportId).del();
-            await trx('shift_reports').insert({
-              ...report,
-              id: newId,
-              cash_register_id: newId
-            });
-          }
-
-          // Eliminar el viejo cash_register
-          await trx('cash_registers').where('id', oldId).del();
+        const report = await trx('shift_reports').where('cash_register_id', oldId).first();
+        if (report) {
+          await trx('shift_reports').where('id', report.id).del();
+          await trx('shift_reports').insert({
+            ...report,
+            id: tempId,
+            cash_register_id: tempId
+          });
         }
+
+        await trx('cash_registers').where('id', oldId).del();
+      }
+
+      // Fase 2: Mover de IDs temporales a 1, 2, 3...
+      for (let i = 0; i < realShifts.length; i++) {
+        const tempId = tempBase + i + 1;
+        const finalId = i + 1;
+
+        const tempReg = await trx('cash_registers').where('id', tempId).first();
+        await trx('cash_registers').insert({ ...tempReg, id: finalId });
+
+        await trx('invoices').where('cash_register_id', tempId).update({ cash_register_id: finalId });
+        await trx('orders').where('cash_register_id', tempId).update({ cash_register_id: finalId });
+        await trx('cash_movements').where('cash_register_id', tempId).update({ cash_register_id: finalId });
+
+        const tempReport = await trx('shift_reports').where('cash_register_id', tempId).first();
+        if (tempReport) {
+          await trx('shift_reports').where('id', tempReport.id).del();
+          await trx('shift_reports').insert({
+            ...tempReport,
+            id: finalId,
+            cash_register_id: finalId
+          });
+        }
+
+        await trx('cash_registers').where('id', tempId).del();
       }
 
       // Reiniciar secuencias de PostgreSQL

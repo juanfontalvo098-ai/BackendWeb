@@ -715,29 +715,28 @@ exports.reorderShifts = async (req, res) => {
     const { businessId } = req.tenant;
 
     await knex.raw(`
-      SET session_replication_role = 'replica';
+      -- 1. Insertar nuevo cash_register con id = 2 copiando de 3
+      INSERT INTO cash_registers (id, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers, created_at, updated_at)
+      SELECT 2, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers, created_at, updated_at
+      FROM cash_registers WHERE id = 3 AND business_id = '${businessId}'
+      ON CONFLICT (id) DO NOTHING;
 
-      -- 1. Unificar Turno 1 (Jornada Mañana - 23 de Agosto en la mañana)
-      UPDATE cash_registers SET id = 1 WHERE id IN (1, 2) AND opened_at < '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
-      UPDATE shift_reports SET id = 1, cash_register_id = 1 WHERE opened_at < '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
-      UPDATE orders SET cash_register_id = 1 WHERE cash_register_id IN (1, 2) AND business_id = '${businessId}';
-      UPDATE invoices SET cash_register_id = 1 WHERE cash_register_id IN (1, 2) AND business_id = '${businessId}';
-      UPDATE cash_movements SET cash_register_id = 1 WHERE cash_register_id IN (1, 2);
-
-      -- 2. Unificar Turno 2 (Jornada Tarde / Noche - 23 de Agosto en la noche)
-      UPDATE cash_registers SET id = 2 WHERE id IN (2, 3) AND opened_at >= '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
-      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE opened_at >= '2026-08-23 12:00:00+00' AND business_id = '${businessId}';
-      UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      -- 2. Reasignar llaves foráneas a 2
       UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
       UPDATE cash_movements SET cash_register_id = 2 WHERE cash_register_id = 3;
 
-      -- 3. Limpiar registros sobrantes
-      DELETE FROM cash_registers WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
-      DELETE FROM shift_reports WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
+      -- 3. Insertar nuevo shift_report con id = 2 copiando de 3
+      INSERT INTO shift_reports (id, business_id, branch_id, cash_register_id, user_id, user_name, shift_name, opened_at, closed_at, opening_amount, closing_amount, expected_amount, difference, gross_revenue, net_revenue, tax_total, total_tips, total_tickets, cash_sales, card_sales, transfer_sales, total_withdrawals, total_voids, snapshot_json, declared_transfers, created_at)
+      SELECT 2, business_id, branch_id, 2, user_id, user_name, shift_name, opened_at, closed_at, opening_amount, closing_amount, expected_amount, difference, gross_revenue, net_revenue, tax_total, total_tips, total_tickets, cash_sales, card_sales, transfer_sales, total_withdrawals, total_voids, snapshot_json, declared_transfers, created_at
+      FROM shift_reports WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}'
+      ON CONFLICT (id) DO NOTHING;
 
-      SET session_replication_role = 'origin';
+      -- 4. Eliminar los registros viejos con id = 3
+      DELETE FROM shift_reports WHERE id = 3 AND business_id = '${businessId}';
+      DELETE FROM cash_registers WHERE id = 3 AND business_id = '${businessId}';
 
-      -- 4. Ajustar secuencias
+      -- 5. Ajustar secuencias
       SELECT setval('cash_registers_id_seq', 2);
       SELECT setval('shift_reports_id_seq', 2);
     `);

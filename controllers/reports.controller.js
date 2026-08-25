@@ -715,11 +715,17 @@ exports.reorderShifts = async (req, res) => {
     const { businessId } = req.tenant;
 
     await knex.raw(`
-      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}';
+      -- Eliminar cualquier caja huérfana temporal que no tenga reporte asociado
+      DELETE FROM cash_registers WHERE id = 2 AND id NOT IN (SELECT cash_register_id FROM shift_reports);
+
       UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
       UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
       UPDATE cash_movements SET cash_register_id = 2 WHERE cash_register_id = 3;
+      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}';
       UPDATE cash_registers SET id = 2 WHERE id = 3 AND business_id = '${businessId}';
+
+      DELETE FROM shift_reports WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
+      DELETE FROM cash_registers WHERE id NOT IN (1, 2) AND business_id = '${businessId}';
 
       SELECT setval('cash_registers_id_seq', 2);
       SELECT setval('shift_reports_id_seq', 2);

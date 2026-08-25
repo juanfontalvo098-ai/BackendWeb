@@ -819,7 +819,7 @@ exports.reorderShifts = async (req, res) => {
       const expectedCash = (initialFloat + cashSales + cashInflows) - (cashOutflows + cashRefunds);
       const declaredCashVal = parseFloat(register.closing_amount || 0);
       const diffCash = declaredCashVal - expectedCash;
-      const declaredTransfersVal = register.declared_transfers !== null ? parseFloat(register.declared_transfers) : null;
+      const declaredTransfersVal = register.declared_transfers !== null && register.declared_transfers !== undefined ? parseFloat(register.declared_transfers) : null;
       const diffTransfers = declaredTransfersVal !== null ? (declaredTransfersVal - transferSales) : 0;
       const totalDifference = diffCash + diffTransfers;
 

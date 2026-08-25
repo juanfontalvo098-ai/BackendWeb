@@ -262,7 +262,7 @@ exports.getBalanceSheet = async (req, res) => {
     const prodInv = await knex('inventory as i')
       .join('products as p', 'i.product_id', 'p.id')
       .where('p.business_id', businessId)
-      .andWhere('p.is_active', true)
+      .andWhere('p.is_available', true)
       .select(knex.raw('COALESCE(SUM(i.quantity * COALESCE(p.cost_price, p.price * 0.6, 0)), 0)::float as total_products_cost'))
       .first();
 

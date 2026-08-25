@@ -221,7 +221,7 @@ exports.exportShiftExcel = async (req, res) => {
 
     sheet1.addRow([]);
     sheet1.addRow(['Cajero / Responsable:', shift.user_name || '---', 'Nombre Turno:', shift.shift_name || 'Turno General']);
-    sheet1.addRow(['Apertura de Caja:', shift.opened_at ? new Date(shift.opened_at).toLocaleString() : '---', 'Cierre de Caja:', shift.closed_at ? new Date(shift.closed_at).toLocaleString() : '---']);
+    sheet1.addRow(['Apertura de Caja:', shift.opened_at ? new Date(shift.opened_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : '---', 'Cierre de Caja:', shift.closed_at ? new Date(shift.closed_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : '---']);
     sheet1.getRow(4).font = { bold: true };
     sheet1.getRow(5).font = { bold: true };
     sheet1.addRow([]);
@@ -651,8 +651,8 @@ exports.exportConsolidatedExcel = async (req, res) => {
         id: s.id,
         user_name: s.user_name || '---',
         shift_name: s.shift_name || '---',
-        opened_at: s.opened_at ? new Date(s.opened_at).toLocaleString() : '---',
-        closed_at: s.closed_at ? new Date(s.closed_at).toLocaleString() : '---',
+        opened_at: s.opened_at ? new Date(s.opened_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : '---',
+        closed_at: s.closed_at ? new Date(s.closed_at).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : '---',
         opening_amount: parseFloat(s.opening_amount || 0),
         gross_revenue: parseFloat(s.gross_revenue || 0),
         cash_sales: parseFloat(s.cash_sales || 0),

@@ -1295,11 +1295,17 @@ exports.syncCashMovementsToJournal = async (req, res) => {
           .whereIn('journal_entry_id', payrollEntryIds)
           .andWhere('debit', '>', 0)
           .update({ account_id: payrollExpenseAcc.id });
-    // Limpiar insumos inactivos de prueba huérfanos
-    const inactiveSupplyIds = (await knex('supplies').where({ business_id: businessId, is_active: false }).select('id')).map(x => x.id);
-    if (inactiveSupplyIds.length > 0) {
-      await knex('supplies_inventory').whereIn('supply_id', inactiveSupplyIds).del();
-      await knex('supplies').whereIn('id', inactiveSupplyIds).del();
+      }
+    }
+
+    // Poner en 0 la cantidad en inventario de insumos inactivos
+    try {
+      const inactiveSupplyIds = (await knex('supplies').where({ business_id: businessId, is_active: false }).select('id')).map(x => x.id);
+      if (inactiveSupplyIds.length > 0) {
+        await knex('supplies_inventory').whereIn('supply_id', inactiveSupplyIds).update({ quantity: 0, reserved_quantity: 0 });
+      }
+    } catch (cleanErr) {
+      console.warn('Advertencia al limpiar inventario de insumos inactivos:', cleanErr.message);
     }
 
     res.json({ message: `Sincronización completada. ${createdCount} asientos contables de egresos/ingresos generados.`, createdCount });

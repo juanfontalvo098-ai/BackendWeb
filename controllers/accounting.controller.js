@@ -258,17 +258,19 @@ exports.getBalanceSheet = async (req, res) => {
     const { asOfDate } = req.query;
     const dateFilter = asOfDate || new Date().toISOString().slice(0, 10);
 
-    // 1. Inventario Real Valorizado de Productos Terminados
+    // 1. Inventario Real Valorizado de Productos Terminados Activos
     const prodInv = await knex('inventory as i')
       .join('products as p', 'i.product_id', 'p.id')
       .where('p.business_id', businessId)
+      .andWhere('p.is_active', true)
       .select(knex.raw('COALESCE(SUM(i.quantity * COALESCE(p.cost_price, p.price * 0.6, 0)), 0)::float as total_products_cost'))
       .first();
 
-    // 2. Inventario Real Valorizado de Insumos / Materias Primas
+    // 2. Inventario Real Valorizado de Insumos / Materias Primas Activos
     const supInv = await knex('supplies_inventory as si')
       .join('supplies as s', 'si.supply_id', 's.id')
       .where('s.business_id', businessId)
+      .andWhere('s.is_active', true)
       .select(knex.raw('COALESCE(SUM(si.quantity * COALESCE(s.cost_price, 0)), 0)::float as total_supplies_cost'))
       .first();
 
@@ -1293,7 +1295,11 @@ exports.syncCashMovementsToJournal = async (req, res) => {
           .whereIn('journal_entry_id', payrollEntryIds)
           .andWhere('debit', '>', 0)
           .update({ account_id: payrollExpenseAcc.id });
-      }
+    // Limpiar insumos inactivos de prueba huérfanos
+    const inactiveSupplyIds = (await knex('supplies').where({ business_id: businessId, is_active: false }).select('id')).map(x => x.id);
+    if (inactiveSupplyIds.length > 0) {
+      await knex('supplies_inventory').whereIn('supply_id', inactiveSupplyIds).del();
+      await knex('supplies').whereIn('id', inactiveSupplyIds).del();
     }
 
     res.json({ message: `Sincronización completada. ${createdCount} asientos contables de egresos/ingresos generados.`, createdCount });

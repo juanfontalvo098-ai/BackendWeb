@@ -130,12 +130,16 @@ exports.getShiftById = async (req, res) => {
     const { id } = req.params;
     const { businessId } = req.tenant;
 
-    const shift = await knex('shift_reports')
-      .where('business_id', businessId)
-      .andWhere(function() {
-        this.where('id', id).orWhere('cash_register_id', id);
-      })
+    // Buscar primero por ID de reporte exacto
+    let shift = await knex('shift_reports')
+      .where({ business_id: businessId, id })
       .first();
+
+    if (!shift) {
+      shift = await knex('shift_reports')
+        .where({ business_id: businessId, cash_register_id: id })
+        .first();
+    }
 
     if (!shift) return res.status(404).json({ error: 'Informe de turno no encontrado' });
 
@@ -160,12 +164,15 @@ exports.exportShiftExcel = async (req, res) => {
     const { id } = req.params;
     const { businessId } = req.tenant;
 
-    const shift = await knex('shift_reports')
-      .where('business_id', businessId)
-      .andWhere(function() {
-        this.where('id', id).orWhere('cash_register_id', id);
-      })
+    let shift = await knex('shift_reports')
+      .where({ business_id: businessId, id })
       .first();
+
+    if (!shift) {
+      shift = await knex('shift_reports')
+        .where({ business_id: businessId, cash_register_id: id })
+        .first();
+    }
 
     if (!shift) return res.status(404).json({ error: 'Informe de turno no encontrado' });
 
@@ -674,12 +681,15 @@ exports.getShiftSuppliesUsage = async (req, res) => {
     const { id } = req.params;
     const { businessId } = req.tenant;
 
-    const shift = await knex('shift_reports')
-      .where('business_id', businessId)
-      .andWhere(function() {
-        this.where('id', id).orWhere('cash_register_id', id);
-      })
+    let shift = await knex('shift_reports')
+      .where({ business_id: businessId, id })
       .first();
+
+    if (!shift) {
+      shift = await knex('shift_reports')
+        .where({ business_id: businessId, cash_register_id: id })
+        .first();
+    }
 
     if (!shift) return res.status(404).json({ error: 'Informe de turno no encontrado' });
 
@@ -697,5 +707,73 @@ exports.getShiftSuppliesUsage = async (req, res) => {
   } catch (err) {
     console.error('Error calculando insumos por turno:', err);
     res.status(500).json({ error: 'Error al calcular insumos utilizados' });
+  }
+};
+
+exports.reorderShifts = async (req, res) => {
+  try {
+    const { businessId } = req.tenant;
+
+    await knex.transaction(async (trx) => {
+      // 1. Obtener todos los turnos reales existentes ordenados por fecha de apertura ascendente
+      const realShifts = await trx('cash_registers')
+        .where('business_id', businessId)
+        .orderBy('opened_at', 'asc')
+        .orderBy('id', 'asc');
+
+      console.log(`Renumerando ${realShifts.length} turnos para business ${businessId}...`);
+
+      for (let i = 0; i < realShifts.length; i++) {
+        const oldId = realShifts[i].id;
+        const newId = i + 1; // 1, 2, 3...
+
+        if (oldId === newId) continue;
+
+        // Copiar registro con newId temporal o directo si no existe
+        const existingRegister = await trx('cash_registers').where('id', newId).first();
+        if (!existingRegister) {
+          const regData = { ...realShifts[i], id: newId };
+          await trx('cash_registers').insert(regData);
+
+          // Actualizar tablas foráneas
+          await trx('invoices').where('cash_register_id', oldId).update({ cash_register_id: newId });
+          await trx('orders').where('cash_register_id', oldId).update({ cash_register_id: newId });
+          await trx('cash_movements').where('cash_register_id', oldId).update({ cash_register_id: newId });
+
+          // Actualizar shift_reports
+          const report = await trx('shift_reports').where('cash_register_id', oldId).first();
+          if (report) {
+            const oldReportId = report.id;
+            await trx('shift_reports').where('id', oldReportId).del();
+            await trx('shift_reports').insert({
+              ...report,
+              id: newId,
+              cash_register_id: newId
+            });
+          }
+
+          // Eliminar el viejo cash_register
+          await trx('cash_registers').where('id', oldId).del();
+        }
+      }
+
+      // Reiniciar secuencias de PostgreSQL
+      const maxReg = await trx('cash_registers').max('id as max').first();
+      const maxReport = await trx('shift_reports').max('id as max').first();
+      const nextReg = parseInt(maxReg?.max || 0, 10);
+      const nextReport = parseInt(maxReport?.max || 0, 10);
+
+      await trx.raw(`SELECT setval('cash_registers_id_seq', ?)`, [Math.max(nextReg, 1)]);
+      await trx.raw(`SELECT setval('shift_reports_id_seq', ?)`, [Math.max(nextReport, 1)]);
+    });
+
+    const updatedShifts = await knex('shift_reports')
+      .where('business_id', businessId)
+      .orderBy('id', 'asc');
+
+    res.json({ message: 'Turnos renumerados exitosamente', shifts: updatedShifts });
+  } catch (err) {
+    console.error('Error al renumerar turnos:', err);
+    res.status(500).json({ error: 'Error al renumerar turnos: ' + err.message });
   }
 };

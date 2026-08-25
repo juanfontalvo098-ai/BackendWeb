@@ -714,76 +714,37 @@ exports.reorderShifts = async (req, res) => {
   try {
     const { businessId } = req.tenant;
 
-    await knex.transaction(async (trx) => {
-      // 1. Obtener todos los turnos reales existentes ordenados por fecha de apertura ascendente
-      const realShifts = await trx('cash_registers')
-        .where('business_id', businessId)
-        .orderBy('opened_at', 'asc')
-        .orderBy('id', 'asc');
+    await knex.raw(`
+      DO $$
+      DECLARE
+        r RECORD;
+        new_num INT := 1;
+      BEGIN
+        -- Paso 1: Mover a IDs temporales (9001, 9002...)
+        FOR r IN (SELECT id FROM cash_registers WHERE business_id = '${businessId}' ORDER BY opened_at ASC, id ASC) LOOP
+          UPDATE invoices SET cash_register_id = 9000 + new_num WHERE cash_register_id = r.id;
+          UPDATE orders SET cash_register_id = 9000 + new_num WHERE cash_register_id = r.id;
+          UPDATE cash_movements SET cash_register_id = 9000 + new_num WHERE cash_register_id = r.id;
+          UPDATE shift_reports SET id = 9000 + new_num, cash_register_id = 9000 + new_num WHERE cash_register_id = r.id OR id = r.id;
+          UPDATE cash_registers SET id = 9000 + new_num WHERE id = r.id;
+          new_num := new_num + 1;
+        END LOOP;
 
-      console.log(`Renumerando ${realShifts.length} turnos para business ${businessId}...`);
+        -- Paso 2: Mover a IDs limpios consecutivos (1, 2, 3...)
+        new_num := 1;
+        FOR r IN (SELECT id FROM cash_registers WHERE business_id = '${businessId}' ORDER BY opened_at ASC, id ASC) LOOP
+          UPDATE invoices SET cash_register_id = new_num WHERE cash_register_id = r.id;
+          UPDATE orders SET cash_register_id = new_num WHERE cash_register_id = r.id;
+          UPDATE cash_movements SET cash_register_id = new_num WHERE cash_register_id = r.id;
+          UPDATE shift_reports SET id = new_num, cash_register_id = new_num WHERE cash_register_id = r.id OR id = r.id;
+          UPDATE cash_registers SET id = new_num WHERE id = r.id;
+          new_num := new_num + 1;
+        END LOOP;
 
-      const tempBase = 9000;
-
-      // Fase 1: Mover a IDs temporales (9001, 9002...) para evitar colisiones
-      for (let i = 0; i < realShifts.length; i++) {
-        const oldId = realShifts[i].id;
-        const tempId = tempBase + i + 1;
-
-        const regData = { ...realShifts[i], id: tempId };
-        await trx('cash_registers').insert(regData);
-
-        await trx('invoices').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-        await trx('orders').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-        await trx('cash_movements').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-
-        const report = await trx('shift_reports').where('cash_register_id', oldId).first();
-        if (report) {
-          await trx('shift_reports').where('id', report.id).del();
-          await trx('shift_reports').insert({
-            ...report,
-            id: tempId,
-            cash_register_id: tempId
-          });
-        }
-
-        await trx('cash_registers').where('id', oldId).del();
-      }
-
-      // Fase 2: Mover de IDs temporales a 1, 2, 3...
-      for (let i = 0; i < realShifts.length; i++) {
-        const tempId = tempBase + i + 1;
-        const finalId = i + 1;
-
-        const tempReg = await trx('cash_registers').where('id', tempId).first();
-        await trx('cash_registers').insert({ ...tempReg, id: finalId });
-
-        await trx('invoices').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-        await trx('orders').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-        await trx('cash_movements').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-
-        const tempReport = await trx('shift_reports').where('cash_register_id', tempId).first();
-        if (tempReport) {
-          await trx('shift_reports').where('id', tempReport.id).del();
-          await trx('shift_reports').insert({
-            ...tempReport,
-            id: finalId,
-            cash_register_id: finalId
-          });
-        }
-
-        await trx('cash_registers').where('id', tempId).del();
-      }
-
-      // Reiniciar secuencias de PostgreSQL
-      const maxReg = await trx('cash_registers').max('id as max').first();
-      const maxReport = await trx('shift_reports').max('id as max').first();
-      const nextReg = parseInt(maxReg?.max || 0, 10);
-      const nextReport = parseInt(maxReport?.max || 0, 10);
-
-      await trx.raw(`SELECT setval('cash_registers_id_seq', ?)`, [Math.max(nextReg, 1)]);
-      await trx.raw(`SELECT setval('shift_reports_id_seq', ?)`, [Math.max(nextReport, 1)]);
-    });
+        PERFORM setval('cash_registers_id_seq', (SELECT COALESCE(MAX(id), 1) FROM cash_registers));
+        PERFORM setval('shift_reports_id_seq', (SELECT COALESCE(MAX(id), 1) FROM shift_reports));
+      END $$;
+    `);
 
     const updatedShifts = await knex('shift_reports')
       .where('business_id', businessId)

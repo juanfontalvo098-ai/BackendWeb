@@ -714,40 +714,168 @@ exports.reorderShifts = async (req, res) => {
   try {
     const { businessId } = req.tenant;
 
-    await knex.raw(`
-      -- 1. Insertar nuevo cash_register con id = 2 copiando de 3
-      INSERT INTO cash_registers (id, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers)
-      SELECT 2, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers
-      FROM cash_registers WHERE id = 3 AND business_id = '${businessId}'
-      ON CONFLICT (id) DO NOTHING;
+    // 1. Asignar de forma precisa órdenes y facturas a cada turno por fecha y hora
+    await knex('orders')
+      .where('business_id', businessId)
+      .andWhere('created_at', '<', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 1 });
 
-      -- 2. Reasignar llaves foráneas a 2
-      UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
-      UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
-      UPDATE cash_movements SET cash_register_id = 2 WHERE cash_register_id = 3;
+    await knex('invoices')
+      .where('business_id', businessId)
+      .andWhere('created_at', '<', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 1 });
 
-      -- 3. Insertar nuevo shift_report con id = 2 copiando de 3
-      INSERT INTO shift_reports (id, business_id, branch_id, cash_register_id, user_id, user_name, shift_name, opened_at, closed_at, opening_amount, closing_amount, expected_amount, difference, gross_revenue, net_revenue, tax_total, total_tips, total_tickets, cash_sales, card_sales, transfer_sales, total_withdrawals, total_voids, snapshot_json, declared_transfers, created_at)
-      SELECT 2, business_id, branch_id, 2, user_id, user_name, shift_name, opened_at, closed_at, opening_amount, closing_amount, expected_amount, difference, gross_revenue, net_revenue, tax_total, total_tips, total_tickets, cash_sales, card_sales, transfer_sales, total_withdrawals, total_voids, snapshot_json, declared_transfers, created_at
-      FROM shift_reports WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}'
-      ON CONFLICT (id) DO NOTHING;
+    await knex('orders')
+      .where('business_id', businessId)
+      .andWhere('created_at', '>=', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 2 });
 
-      -- 4. Eliminar los registros viejos con id = 3
-      DELETE FROM shift_reports WHERE id = 3 AND business_id = '${businessId}';
-      DELETE FROM cash_registers WHERE id = 3 AND business_id = '${businessId}';
+    await knex('invoices')
+      .where('business_id', businessId)
+      .andWhere('created_at', '>=', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 2 });
 
-      -- 5. Ajustar secuencias
-      SELECT setval('cash_registers_id_seq', 2);
-      SELECT setval('shift_reports_id_seq', 2);
-    `);
+    // 2. Para cada uno de los turnos (1 y 2), recalcular totalmente sus métricas y snapshot_json
+    const shiftsToRecalculate = [1, 2];
+
+    for (const shiftId of shiftsToRecalculate) {
+      const register = await knex('cash_registers').where({ id: shiftId, business_id: businessId }).first();
+      if (!register) continue;
+
+      // Obtener facturas con detalles completos
+      const invoices = await knex('invoices as i')
+        .join('orders as o', 'i.order_id', 'o.id')
+        .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+        .join('users as u', 'o.user_id', 'u.id')
+        .select('i.*', 'o.table_id', 't.table_number', 'u.full_name as waiter_name')
+        .where('i.cash_register_id', shiftId)
+        .orderBy('i.created_at', 'asc');
+
+      let grossRevenue = 0, netRevenue = 0, taxTotal = 0, totalTips = 0;
+      let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0;
+
+      invoices.forEach(inv => {
+        const total = parseFloat(inv.total || 0);
+        grossRevenue += total;
+        netRevenue += parseFloat(inv.subtotal || 0);
+        taxTotal += parseFloat(inv.tax_total || 0);
+        totalTips += parseFloat(inv.tip_amount || 0);
+
+        const cAmt = parseFloat(inv.cash_amount || 0);
+        const tAmt = parseFloat(inv.transfer_amount || 0);
+        const kAmt = parseFloat(inv.card_amount || 0);
+
+        if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
+          cashSales += cAmt;
+          transferSales += tAmt;
+          cardSales += kAmt;
+          const rem = total - (cAmt + tAmt + kAmt);
+          if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
+        } else if (inv.payment_method === 'efectivo') cashSales += total;
+        else if (inv.payment_method === 'tarjeta') cardSales += total;
+        else if (inv.payment_method === 'transferencia') transferSales += total;
+        else if (inv.payment_method === 'credito') creditSales += total;
+        else cashSales += total;
+      });
+
+      const movements = await knex('cash_movements')
+        .select('type', 'amount', 'payment_method', 'description', 'created_at')
+        .where('cash_register_id', shiftId)
+        .orderBy('created_at', 'asc');
+
+      let cashInflows = 0, cashOutflows = 0, cashRefunds = 0;
+      movements.forEach(m => {
+        const amt = parseFloat(m.amount || 0);
+        if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
+        if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
+        if (m.type === 'devolucion' && m.payment_method === 'efectivo') cashRefunds += amt;
+      });
+
+      const initialFloat = parseFloat(register.opening_amount || 0);
+      const expectedCash = (initialFloat + cashSales + cashInflows) - (cashOutflows + cashRefunds);
+      const declaredCashVal = parseFloat(register.closing_amount || 0);
+      const diffCash = declaredCashVal - expectedCash;
+      const declaredTransfersVal = register.declared_transfers !== null ? parseFloat(register.declared_transfers) : null;
+      const diffTransfers = declaredTransfersVal !== null ? (declaredTransfersVal - transferSales) : 0;
+      const totalDifference = diffCash + diffTransfers;
+
+      const itemizedSales = await knex('order_items as oi')
+        .join('products as p', 'oi.product_id', 'p.id')
+        .join('categories as c', 'p.category_id', 'c.id')
+        .join('invoices as i', 'oi.order_id', 'i.order_id')
+        .where('i.cash_register_id', shiftId)
+        .groupBy('p.id', 'p.name', 'c.name')
+        .select(
+          'p.name as product_name',
+          'c.name as category_name',
+          knex.raw('SUM(oi.quantity) as quantity'),
+          knex.raw('SUM(oi.quantity * oi.unit_price) as total_sales'),
+          knex.raw('AVG(oi.unit_price) as unit_price')
+        );
+
+      const snapshot = {
+        invoices,
+        itemizedSales,
+        movements,
+        initialFloat,
+        openingAmount: initialFloat,
+        opening_amount: initialFloat,
+        cashSales,
+        cardSales,
+        transferSales,
+        creditSales,
+        cashInflows,
+        cashOutflows,
+        cashRefunds,
+        expectedCash,
+        expected_amount: expectedCash,
+        declaredCash: declaredCashVal,
+        closing_amount: declaredCashVal,
+        declaredTransfers: declaredTransfersVal,
+        difference: totalDifference,
+        differenceCash: diffCash,
+        differenceTransfers: diffTransfers,
+        totalTips,
+        grossRevenue,
+        netRevenue,
+        taxTotal,
+        totalTickets: invoices.length,
+        invoicesCount: invoices.length,
+        closedAt: register.closed_at,
+        openedAt: register.opened_at,
+        shiftName: shiftId === 1 ? 'Jornada Mañana' : 'Jornada Tarde / Noche',
+        userName: 'Johana Rodriguez'
+      };
+
+      // Actualizar cash_registers con montos exactos
+      await knex('cash_registers').where({ id: shiftId, business_id: businessId }).update({
+        expected_amount: expectedCash,
+        difference: totalDifference
+      });
+
+      // Actualizar shift_reports con totales reales
+      await knex('shift_reports').where({ id: shiftId, business_id: businessId }).update({
+        gross_revenue: grossRevenue,
+        net_revenue: netRevenue,
+        tax_total: taxTotal,
+        total_tips: totalTips,
+        total_tickets: invoices.length,
+        cash_sales: cashSales,
+        card_sales: cardSales,
+        transfer_sales: transferSales,
+        expected_amount: expectedCash,
+        difference: totalDifference,
+        snapshot_json: JSON.stringify(snapshot)
+      });
+    }
 
     const updatedShifts = await knex('shift_reports')
       .where('business_id', businessId)
       .orderBy('id', 'asc');
 
-    res.json({ message: 'Turnos renumerados exitosamente', shifts: updatedShifts });
+    res.json({ message: 'Reportes y turnos recalculados con éxito', shifts: updatedShifts });
   } catch (err) {
-    console.error('Error al renumerar turnos:', err);
-    res.status(500).json({ error: 'Error al renumerar turnos: ' + err.message });
+    console.error('Error recalculando reportes de turnos:', err);
+    res.status(500).json({ error: 'Error al recalcular turnos: ' + err.message });
   }
 };

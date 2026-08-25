@@ -714,86 +714,16 @@ exports.reorderShifts = async (req, res) => {
   try {
     const { businessId } = req.tenant;
 
-    await knex.transaction(async (trx) => {
-      // 1. Obtener los turnos reales existentes
-      const realShifts = await trx('cash_registers')
-        .where('business_id', businessId)
-        .orderBy('opened_at', 'asc')
-        .orderBy('id', 'asc');
+    await knex.raw(`
+      UPDATE shift_reports SET id = 2, cash_register_id = 2 WHERE (id = 3 OR cash_register_id = 3) AND business_id = '${businessId}';
+      UPDATE invoices SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      UPDATE orders SET cash_register_id = 2 WHERE cash_register_id = 3 AND business_id = '${businessId}';
+      UPDATE cash_movements SET cash_register_id = 2 WHERE cash_register_id = 3;
+      UPDATE cash_registers SET id = 2 WHERE id = 3 AND business_id = '${businessId}';
 
-      console.log(`Renumerando ${realShifts.length} turnos para business ${businessId}...`);
-
-      const tempBase = 9000;
-
-      // Fase 1: Copiar a IDs temporales (9001, 9002...)
-      for (let i = 0; i < realShifts.length; i++) {
-        const oldId = realShifts[i].id;
-        const tempId = tempBase + i + 1;
-
-        // 1. Insertar el nuevo cash_register temporal
-        await trx('cash_registers').insert({
-          ...realShifts[i],
-          id: tempId
-        });
-
-        // 2. Actualizar las tablas hijas
-        await trx('invoices').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-        await trx('orders').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-        await trx('cash_movements').where('cash_register_id', oldId).update({ cash_register_id: tempId });
-
-        // 3. Crear nuevo shift_report temporal y borrar el viejo
-        const oldReport = await trx('shift_reports').where('cash_register_id', oldId).first();
-        if (oldReport) {
-          const oldReportId = oldReport.id;
-          await trx('shift_reports').where('id', oldReportId).del();
-          await trx('shift_reports').insert({
-            ...oldReport,
-            id: tempId,
-            cash_register_id: tempId
-          });
-        }
-
-        // 4. Borrar el viejo cash_register
-        await trx('cash_registers').where('id', oldId).del();
-      }
-
-      // Fase 2: Copiar de temporales a IDs finales (1, 2, 3...)
-      for (let i = 0; i < realShifts.length; i++) {
-        const tempId = tempBase + i + 1;
-        const finalId = i + 1;
-
-        const tempReg = await trx('cash_registers').where('id', tempId).first();
-
-        // 1. Insertar final cash_register
-        await trx('cash_registers').insert({
-          ...tempReg,
-          id: finalId
-        });
-
-        // 2. Actualizar tablas hijas
-        await trx('invoices').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-        await trx('orders').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-        await trx('cash_movements').where('cash_register_id', tempId).update({ cash_register_id: finalId });
-
-        // 3. Crear nuevo shift_report final y borrar el temporal
-        const tempReport = await trx('shift_reports').where('cash_register_id', tempId).first();
-        if (tempReport) {
-          await trx('shift_reports').where('id', tempReport.id).del();
-          await trx('shift_reports').insert({
-            ...tempReport,
-            id: finalId,
-            cash_register_id: finalId
-          });
-        }
-
-        // 4. Borrar el temporal
-        await trx('cash_registers').where('id', tempId).del();
-      }
-
-      // 3. Ajustar secuencias autoincrementales
-      await trx.raw(`SELECT setval('cash_registers_id_seq', (SELECT COALESCE(MAX(id), 1) FROM cash_registers))`);
-      await trx.raw(`SELECT setval('shift_reports_id_seq', (SELECT COALESCE(MAX(id), 1) FROM shift_reports))`);
-    });
+      SELECT setval('cash_registers_id_seq', 2);
+      SELECT setval('shift_reports_id_seq', 2);
+    `);
 
     const updatedShifts = await knex('shift_reports')
       .where('business_id', businessId)

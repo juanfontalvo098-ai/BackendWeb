@@ -716,8 +716,8 @@ exports.reorderShifts = async (req, res) => {
 
     await knex.raw(`
       -- 1. Insertar nuevo cash_register con id = 2 copiando de 3
-      INSERT INTO cash_registers (id, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers, created_at, updated_at)
-      SELECT 2, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers, created_at, updated_at
+      INSERT INTO cash_registers (id, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers)
+      SELECT 2, business_id, branch_id, user_id, opening_amount, closing_amount, expected_amount, difference, status, opened_at, closed_at, declared_transfers
       FROM cash_registers WHERE id = 3 AND business_id = '${businessId}'
       ON CONFLICT (id) DO NOTHING;
 

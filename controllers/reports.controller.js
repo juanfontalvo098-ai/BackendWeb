@@ -714,7 +714,26 @@ exports.reorderShifts = async (req, res) => {
   try {
     const { businessId } = req.tenant;
 
-    // 1. Asignar de forma precisa órdenes y facturas a cada turno por fecha y hora
+    // 1. Corregir datos base de los turnos en cash_registers
+    await knex('cash_registers').where({ id: 1, business_id: businessId }).update({
+      opened_at: '2026-08-23T00:02:54.899Z',
+      closed_at: '2026-08-23T06:37:37.556Z',
+      opening_amount: 150000.00,
+      closing_amount: 852150.00,
+      declared_transfers: null,
+      status: 'cerrada'
+    });
+
+    await knex('cash_registers').where({ id: 2, business_id: businessId }).update({
+      opened_at: '2026-08-23T21:51:25.069Z',
+      closed_at: '2026-08-24T04:12:05.993Z',
+      opening_amount: 150000.00,
+      closing_amount: 272700.00,
+      declared_transfers: 44500.00,
+      status: 'cerrada'
+    });
+
+    // 2. Asignar órdenes, facturas y movimientos a cada turno por fecha de creación
     await knex('orders')
       .where('business_id', businessId)
       .andWhere('created_at', '<', '2026-08-23T12:00:00.000Z')
@@ -723,6 +742,10 @@ exports.reorderShifts = async (req, res) => {
     await knex('invoices')
       .where('business_id', businessId)
       .andWhere('created_at', '<', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 1 });
+
+    await knex('cash_movements')
+      .where('created_at', '<', '2026-08-23T12:00:00.000Z')
       .update({ cash_register_id: 1 });
 
     await knex('orders')
@@ -735,14 +758,15 @@ exports.reorderShifts = async (req, res) => {
       .andWhere('created_at', '>=', '2026-08-23T12:00:00.000Z')
       .update({ cash_register_id: 2 });
 
-    // 2. Para cada uno de los turnos (1 y 2), recalcular totalmente sus métricas y snapshot_json
-    const shiftsToRecalculate = [1, 2];
+    await knex('cash_movements')
+      .where('created_at', '>=', '2026-08-23T12:00:00.000Z')
+      .update({ cash_register_id: 2 });
 
-    for (const shiftId of shiftsToRecalculate) {
+    // 3. Recalcular métricas exactas para Turno 1 y Turno 2
+    for (const shiftId of [1, 2]) {
       const register = await knex('cash_registers').where({ id: shiftId, business_id: businessId }).first();
       if (!register) continue;
 
-      // Obtener facturas con detalles completos
       const invoices = await knex('invoices as i')
         .join('orders as o', 'i.order_id', 'o.id')
         .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
@@ -847,14 +871,17 @@ exports.reorderShifts = async (req, res) => {
         userName: 'Johana Rodriguez'
       };
 
-      // Actualizar cash_registers con montos exactos
       await knex('cash_registers').where({ id: shiftId, business_id: businessId }).update({
         expected_amount: expectedCash,
         difference: totalDifference
       });
 
-      // Actualizar shift_reports con totales reales
       await knex('shift_reports').where({ id: shiftId, business_id: businessId }).update({
+        opened_at: register.opened_at,
+        closed_at: register.closed_at,
+        opening_amount: register.opening_amount,
+        closing_amount: register.closing_amount,
+        declared_transfers: register.declared_transfers,
         gross_revenue: grossRevenue,
         net_revenue: netRevenue,
         tax_total: taxTotal,
@@ -863,6 +890,7 @@ exports.reorderShifts = async (req, res) => {
         cash_sales: cashSales,
         card_sales: cardSales,
         transfer_sales: transferSales,
+        total_withdrawals: cashOutflows,
         expected_amount: expectedCash,
         difference: totalDifference,
         snapshot_json: JSON.stringify(snapshot)

@@ -488,7 +488,7 @@ exports.getBalanceSheet = async (req, res) => {
     });
   } catch (err) {
     console.error('Error al generar balance general:', err);
-    res.status(500).json({ error: 'Error al generar balance general' });
+    res.status(500).json({ error: 'Error al generar balance general: ' + err.message });
   }
 };
 

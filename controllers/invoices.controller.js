@@ -597,20 +597,43 @@ exports.create = async (req, res) => {
         .first();
     }
 
-    if (!invoice) {
-      invoice = await knex('invoices as i')
-        .where('i.id', targetInvoiceId)
-        .first();
+    if (!invoice && createdInvoiceRow) {
+      let cust = null;
+      if (finalCustomerId) {
+        cust = await knex('customers').where({ id: finalCustomerId }).first().catch(() => null);
+      }
+      let tbl = null;
+      if (order.table_id) {
+        tbl = await knex('tables_restaurant').where({ id: order.table_id }).first().catch(() => null);
+      }
+
+      invoice = {
+        ...createdInvoiceRow,
+        order_type: order.order_type,
+        delivery_address: order.delivery_address,
+        delivery_phone: order.delivery_phone,
+        delivery_notes: order.delivery_notes,
+        cashier_name: req.user?.full_name || 'Caja',
+        waiter_name: req.user?.full_name || 'Personal',
+        table_number: tbl?.table_number || null,
+        customer_name: cust?.name || (finalCustomerId ? 'Cliente' : 'Consumidor Final'),
+        customer_doc_type: cust?.document_type || 'CC',
+        customer_document: cust?.document_number || '222222222222',
+        customer_phone: cust?.phone || '',
+        customer_address: cust?.address || '',
+        customer_city: cust?.city || '',
+        customer_email: cust?.email || ''
+      };
     }
 
-    if (!invoice) {
+    if (!invoice || !invoice.id) {
       throw new Error('No se pudo confirmar el registro de la factura en la base de datos');
     }
 
     const invoiceItems = await knex('order_items as oi')
       .join('products as p', 'oi.product_id', 'p.id')
       .select('oi.*', 'p.name')
-      .where('oi.order_id', order_id);
+      .where('oi.order_id', parsedOrderId);
 
     let invoiceSettings = null;
     if (effectiveBranchId) {

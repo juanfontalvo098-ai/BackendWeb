@@ -419,7 +419,7 @@ async function deductSingleSupply(trx, { businessId, branchId, supplyId, quantit
 
   await trx('supplies_inventory')
     .where({ id: inv.id })
-    .update({ quantity: newBalance, updated_at: knex.fn.now() });
+    .update({ quantity: newBalance, updated_at: trx.fn.now() });
 
   await trx('supplies_movements').insert({
     business_id: businessId,
@@ -455,7 +455,7 @@ async function deductSingleProduct(trx, { businessId, branchId, productId, quant
 
   await trx('inventory')
     .where({ id: inv.id })
-    .update({ quantity: newBalance, updated_at: knex.fn.now() });
+    .update({ quantity: newBalance, updated_at: trx.fn.now() });
 
   await trx('inventory_movements').insert({
     business_id: businessId,

@@ -478,10 +478,12 @@ exports.create = async (req, res) => {
         await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
       }
 
-      await trx('delivery_assignments').where('order_id', parsedOrderId).update({
-        status: 'entregado',
-        delivered_at: trx.fn.now()
-      });
+      if (order.order_type === 'delivery') {
+        await trx('delivery_assignments').where('order_id', parsedOrderId).update({
+          status: 'entregado',
+          delivered_at: trx.fn.now()
+        });
+      }
 
       // 5. Generar asiento contable automático si existe plan de cuentas
       try {
@@ -496,8 +498,7 @@ exports.create = async (req, res) => {
           const debitAccount = payment_method === 'credito' ? (cxcAccount || cajaAccount) : (cajaAccount || cxcAccount);
 
           if (debitAccount && ventasAccount) {
-            const count = await trx('journal_entries').where('business_id', businessId).count('id as c').first();
-            const entryNum = `AD-${String(parseInt(count.c) + 1).padStart(6, '0')}`;
+            const entryNum = `AST-${businessId.toString().slice(0, 4).toUpperCase()}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
             const [jEntry] = await trx('journal_entries').insert({
               business_id: businessId,

@@ -127,6 +127,7 @@ exports.getPrintFormat = async (req, res) => {
         'u_waiter.full_name as waiter_name',
         't.table_number',
         'c.name as customer_name',
+        'c.document_type as customer_doc_type',
         'c.document_number as customer_document',
         'c.phone as customer_phone',
         'c.address as customer_address',
@@ -196,6 +197,8 @@ exports.create = async (req, res) => {
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
     if (order.status === 'cerrada') return res.status(400).json({ error: 'La orden ya está cerrada' });
 
+    const effectiveBranchId = branchId || order.branch_id || register.branch_id;
+
     const items = await knex('order_items')
       .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included')
       .where('order_id', order_id);
@@ -205,7 +208,8 @@ exports.create = async (req, res) => {
 
     items.forEach(item => {
       const rate = parseFloat(item.tax_rate || 0);
-      const lineTotal = parseInt(item.quantity) * parseFloat(item.unit_price);
+      const qty = parseFloat(item.quantity) || 1;
+      const lineTotal = qty * parseFloat(item.unit_price || 0);
       if (item.tax_included && rate > 0) {
         const itemSub = lineTotal / (1 + rate);
         subtotal += itemSub;
@@ -236,18 +240,28 @@ exports.create = async (req, res) => {
     const total = net_mandatory_total + tip_amount;
     const finalCustomerId = customer_id || order.customer_id || null;
 
-    const parsedAmountPaid = req.body.amount_paid !== undefined ? Math.max(0, parseFloat(req.body.amount_paid)) : (payment_method === 'credito' ? 0 : total);
+    const parsedAmountPaid = (req.body.amount_paid !== undefined && req.body.amount_paid !== null && parseFloat(req.body.amount_paid) > 0)
+      ? Math.max(0, parseFloat(req.body.amount_paid))
+      : (payment_method === 'credito' ? 0 : total);
     const parsedCreditAmount = req.body.credit_amount !== undefined ? Math.max(0, parseFloat(req.body.credit_amount)) : (payment_method === 'credito' ? net_mandatory_total : 0);
     const parsedCreditDueDate = req.body.credit_due_date || null;
 
     // Generar número de factura único, secuencial y exclusivo por negocio/sucursal
-    let settings = await knex('settings')
-      .where({ business_id: businessId, branch_id: branchId })
-      .first();
+    let settings = null;
+    if (effectiveBranchId) {
+      settings = await knex('settings')
+        .where({ business_id: businessId, branch_id: effectiveBranchId })
+        .first();
+    }
     if (!settings) {
       settings = await knex('settings')
         .where({ business_id: businessId })
         .whereNull('branch_id')
+        .first();
+    }
+    if (!settings) {
+      settings = await knex('settings')
+        .where({ business_id: businessId })
         .first();
     }
 
@@ -264,11 +278,13 @@ exports.create = async (req, res) => {
 
     const branches = await knex('branches').where({ business_id: businessId });
     const isMultiBranch = Array.isArray(branches) && branches.length > 1;
-    const branchPrefix = isMultiBranch ? `B${branchId}-` : '';
+    const branchPrefix = isMultiBranch && effectiveBranchId ? `B${effectiveBranchId.toString().slice(0, 4)}-` : '';
 
-    const invCountRes = await knex('invoices')
-      .where({ business_id: businessId, branch_id: branchId })
-      .count('id as total');
+    let invQuery = knex('invoices').where('business_id', businessId);
+    if (effectiveBranchId) {
+      invQuery = invQuery.andWhere('branch_id', effectiveBranchId);
+    }
+    const invCountRes = await invQuery.count('id as total');
     let seq = (invCountRes && invCountRes[0] ? parseInt(invCountRes[0].total, 10) : 0) + 1;
     let invoice_number = `${prefix}-${branchPrefix}${String(seq).padStart(4, '0')}`;
 
@@ -296,9 +312,9 @@ exports.create = async (req, res) => {
     const finalCardAmount = isMixed ? parsedCard : (payment_method === 'tarjeta' ? parsedAmountPaid : 0);
 
     const invoiceId = await knex.transaction(async (trx) => {
-      const [invoiceInfo] = await trx('invoices').insert({
+      const insertedRows = await trx('invoices').insert({
         business_id: businessId,
-        branch_id: branchId,
+        branch_id: effectiveBranchId,
         order_id,
         cash_register_id: register.id,
         user_id,
@@ -319,6 +335,13 @@ exports.create = async (req, res) => {
         invoice_number,
         notes: notes || null
       }).returning('*');
+
+      const invoiceInfo = Array.isArray(insertedRows) ? insertedRows[0] : insertedRows;
+      const createdInvoiceId = invoiceInfo?.id || (typeof invoiceInfo === 'number' ? invoiceInfo : (invoiceInfo && typeof invoiceInfo === 'object' ? invoiceInfo.id : null));
+
+      if (!createdInvoiceId) {
+        throw new Error('No se pudo registrar la factura en la base de datos');
+      }
 
       // 1. Movimientos de caja si hubo abono/pago inmediato
       if (isMixed) {
@@ -370,9 +393,9 @@ exports.create = async (req, res) => {
 
         await trx('accounts_receivable').insert({
           business_id: businessId,
-          branch_id: branchId,
+          branch_id: effectiveBranchId,
           customer_id: finalCustomerId,
-          invoice_id: invoiceInfo.id,
+          invoice_id: createdInvoiceId,
           amount: parsedCreditAmount,
           paid_amount: 0,
           balance: parsedCreditAmount,
@@ -390,9 +413,9 @@ exports.create = async (req, res) => {
         dueDate.setDate(dueDate.getDate() + 30);
         await trx('accounts_receivable').insert({
           business_id: businessId,
-          branch_id: branchId,
+          branch_id: effectiveBranchId,
           customer_id: finalCustomerId,
-          invoice_id: invoiceInfo.id,
+          invoice_id: createdInvoiceId,
           amount: total,
           paid_amount: 0,
           balance: total,
@@ -418,7 +441,7 @@ exports.create = async (req, res) => {
 
       // 3. Descontar inventario automáticamente
       try {
-        await deductStockForInvoice(trx, businessId, branchId, items, user_id);
+        await deductStockForInvoice(trx, businessId, effectiveBranchId, items, user_id);
       } catch (invErr) {
         console.warn('Advertencia al descontar inventario:', invErr.message);
       }
@@ -429,6 +452,7 @@ exports.create = async (req, res) => {
         status: targetOrderStatus,
         customer_id: finalCustomerId,
         delivery_fee: parsedDeliveryFee,
+        cash_register_id: register.id,
         updated_at: trx.fn.now()
       });
 
@@ -459,12 +483,12 @@ exports.create = async (req, res) => {
 
             const [jEntry] = await trx('journal_entries').insert({
               business_id: businessId,
-              branch_id: branchId,
+              branch_id: effectiveBranchId,
               entry_number: entryNum,
               entry_date: new Date().toISOString().slice(0, 10),
               description: `Venta Factura ${invoice_number}`,
               reference_type: 'invoice',
-              reference_id: invoiceInfo.id,
+              reference_id: createdInvoiceId,
               status: 'aprobado',
               user_id
             }).returning('*');
@@ -514,15 +538,11 @@ exports.create = async (req, res) => {
         console.warn('Advertencia al generar asiento contable:', accErr.message);
       }
 
-      const targetId = invoiceInfo && typeof invoiceInfo === 'object' ? (invoiceInfo.id || invoiceInfo) : invoiceInfo;
-      return targetId;
+      return createdInvoiceId;
     });
 
-    if (req.app.locals.io) {
-      if (order.table_id) {
-        req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
-      }
-      req.app.locals.io.to(`branch:${branchId}`).emit('order:updated', { order_id });
+    if (!invoiceId) {
+      throw new Error('Error al confirmar la creación de la factura en la base de datos');
     }
 
     // Obtener factura completa para retornar
@@ -547,6 +567,7 @@ exports.create = async (req, res) => {
         'c.document_number as customer_document',
         'c.phone as customer_phone',
         'c.address as customer_address',
+        'c.city as customer_city',
         'c.email as customer_email',
         'ar.amount as credit_amount',
         'ar.paid_amount as credit_paid_amount',
@@ -554,24 +575,48 @@ exports.create = async (req, res) => {
         'ar.due_date as credit_due_date',
         'ar.status as credit_status'
       )
-      .where('i.id', invoiceId)
+      .where({ 'i.id': invoiceId, 'i.business_id': businessId })
       .first();
+
+    if (!invoice) {
+      throw new Error(`Error al recuperar los datos de la factura generada #${invoiceId}`);
+    }
 
     const invoiceItems = await knex('order_items as oi')
       .join('products as p', 'oi.product_id', 'p.id')
       .select('oi.*', 'p.name')
       .where('oi.order_id', order_id);
 
-    const fullInvoice = { ...invoice, items: invoiceItems };
+    let invoiceSettings = null;
+    if (effectiveBranchId) {
+      invoiceSettings = await knex('settings').where({ business_id: businessId, branch_id: effectiveBranchId }).first();
+    }
+    if (!invoiceSettings) {
+      invoiceSettings = await knex('settings').where({ business_id: businessId }).whereNull('branch_id').first();
+    }
+    if (!invoiceSettings) {
+      invoiceSettings = await knex('settings').where({ business_id: businessId }).first();
+    }
+
+    const fullInvoice = { ...invoice, items: invoiceItems, settings: invoiceSettings };
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${branchId}`).emit('invoice:created', fullInvoice);
+      if (order.table_id) {
+        if (effectiveBranchId) req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
+        req.app.locals.io.to(`business:${businessId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
+      }
+      if (effectiveBranchId) {
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:updated', { order_id });
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('invoice:created', fullInvoice);
+      }
+      req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id });
+      req.app.locals.io.to(`business:${businessId}`).emit('invoice:created', fullInvoice);
     }
 
     res.status(201).json(fullInvoice);
   } catch (err) {
     console.error('Error al generar factura:', err);
-    res.status(500).json({ error: 'Error al generar factura', details: err.message });
+    res.status(500).json({ error: err.message || 'Error al generar factura', details: err.message });
   }
 };
 

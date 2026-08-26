@@ -260,6 +260,9 @@ exports.create = async (req, res) => {
     const parsedCreditAmount = req.body.credit_amount !== undefined ? Math.max(0, parseFloat(req.body.credit_amount)) : (payment_method === 'credito' ? net_mandatory_total : 0);
     const parsedCreditDueDate = req.body.credit_due_date || null;
 
+    const parsedOrderId = parseInt(order_id, 10) || order.id;
+    const targetOrderStatus = parsedCreditAmount > 0 ? 'pendiente_pago' : 'cerrada';
+
     // Generar número de factura único, secuencial y exclusivo por negocio/sucursal
     let settings = null;
     if (effectiveBranchId) {
@@ -463,8 +466,6 @@ exports.create = async (req, res) => {
       }
 
       // 4. Actualizar estado de orden (si hay saldo a crédito pendiente queda 'pendiente_pago', si se pagó completa 'cerrada')
-      const targetOrderStatus = parsedCreditAmount > 0 ? 'pendiente_pago' : 'cerrada';
-      const parsedOrderId = parseInt(order_id, 10) || order.id;
       await trx('orders').where('id', parsedOrderId).update({
         status: targetOrderStatus,
         customer_id: finalCustomerId,

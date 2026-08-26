@@ -598,55 +598,13 @@ exports.create = async (req, res) => {
     }
 
     if (!invoice) {
-      let cust = null;
-      if (finalCustomerId) {
-        cust = await knex('customers').where({ id: finalCustomerId }).first().catch(() => null);
-      }
-      let tbl = null;
-      if (order.table_id) {
-        tbl = await knex('tables_restaurant').where({ id: order.table_id }).first().catch(() => null);
-      }
-      let waiter = null;
-      if (order.user_id) {
-        waiter = await knex('users').where({ id: order.user_id }).first().catch(() => null);
-      }
+      invoice = await knex('invoices as i')
+        .where('i.id', targetInvoiceId)
+        .first();
+    }
 
-      invoice = {
-        ...(createdInvoiceRow || {}),
-        id: targetInvoiceId || createdInvoiceRow?.id,
-        business_id: businessId,
-        branch_id: effectiveBranchId,
-        order_id: parsedOrderId,
-        invoice_number: invoice_number || createdInvoiceRow?.invoice_number,
-        subtotal: subtotalAfterDiscount,
-        tax_total,
-        tip_percentage: tip_percentage || 0,
-        tip_amount,
-        discount_amount: parsedDiscount,
-        delivery_fee: parsedDeliveryFee,
-        total,
-        payment_method: effectivePaymentMethod,
-        cash_amount: finalCashAmount,
-        transfer_amount: finalTransferAmount,
-        card_amount: finalCardAmount,
-        amount_tendered: parsedTendered,
-        change_given: parsedChange,
-        created_at: createdInvoiceRow?.created_at || new Date().toISOString(),
-        order_type: order.order_type,
-        delivery_address: order.delivery_address,
-        delivery_phone: order.delivery_phone,
-        delivery_notes: order.delivery_notes,
-        cashier_name: req.user?.full_name || 'Caja',
-        waiter_name: waiter?.full_name || 'Mesero',
-        table_number: tbl?.table_number || null,
-        customer_name: cust?.name || (finalCustomerId ? 'Cliente' : 'Consumidor Final'),
-        customer_doc_type: cust?.document_type || 'CC',
-        customer_document: cust?.document_number || '222222222222',
-        customer_phone: cust?.phone || '',
-        customer_address: cust?.address || '',
-        customer_city: cust?.city || '',
-        customer_email: cust?.email || ''
-      };
+    if (!invoice) {
+      throw new Error('No se pudo confirmar el registro de la factura en la base de datos');
     }
 
     const invoiceItems = await knex('order_items as oi')

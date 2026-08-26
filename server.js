@@ -204,3 +204,5 @@ const PORT = process.env.PORT || 3001;
     process.exit(1);
   }
 })();
+
+module.exports = app;

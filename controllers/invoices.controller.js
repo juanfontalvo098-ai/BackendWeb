@@ -333,7 +333,7 @@ exports.create = async (req, res) => {
       const insertedRows = await trx('invoices').insert({
         business_id: businessId,
         branch_id: effectiveBranchId,
-        order_id,
+        order_id: parsedOrderId,
         cash_register_id: register.id,
         user_id,
         customer_id: finalCustomerId,
@@ -616,7 +616,7 @@ exports.create = async (req, res) => {
         id: targetInvoiceId || createdInvoiceRow?.id,
         business_id: businessId,
         branch_id: effectiveBranchId,
-        order_id,
+        order_id: parsedOrderId,
         invoice_number: invoice_number || createdInvoiceRow?.invoice_number,
         subtotal: subtotalAfterDiscount,
         tax_total,

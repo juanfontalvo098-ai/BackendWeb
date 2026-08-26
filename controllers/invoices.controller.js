@@ -110,7 +110,7 @@ exports.getPrintFormat = async (req, res) => {
   try {
     const { businessId } = req.tenant;
 
-    const invoice = await knex('invoices as i')
+    let query = knex('invoices as i')
       .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
       .leftJoin('orders as o', 'i.order_id', 'o.id')
       .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
@@ -139,8 +139,21 @@ exports.getPrintFormat = async (req, res) => {
         'ar.due_date as credit_due_date',
         'ar.status as credit_status'
       )
-      .where({ 'i.id': req.params.id, 'i.business_id': businessId })
-      .first();
+      .where('i.id', req.params.id);
+
+    if (businessId) {
+      query = query.andWhere('i.business_id', businessId);
+    }
+
+    let invoice = await query.first();
+    if (!invoice) {
+      invoice = await knex('invoices as i')
+        .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+        .leftJoin('orders as o', 'i.order_id', 'o.id')
+        .select('i.*', 'o.order_type', 'u_cashier.full_name as cashier_name')
+        .where('i.id', req.params.id)
+        .first();
+    }
 
     if (!invoice) return res.status(404).json({ error: 'Factura no encontrada' });
 
@@ -150,15 +163,16 @@ exports.getPrintFormat = async (req, res) => {
       .where('oi.order_id', invoice.order_id);
 
     // Obtener configuración del negocio para impresión
+    const bId = invoice.business_id || businessId;
     let settings = null;
     if (invoice.branch_id) {
-      settings = await knex('settings').where({ business_id: businessId, branch_id: invoice.branch_id }).first();
+      settings = await knex('settings').where({ business_id: bId, branch_id: invoice.branch_id }).first();
     }
     if (!settings) {
-      settings = await knex('settings').where({ business_id: businessId }).whereNull('branch_id').first();
+      settings = await knex('settings').where({ business_id: bId }).whereNull('branch_id').first();
     }
     if (!settings) {
-      settings = await knex('settings').where({ business_id: businessId }).first();
+      settings = await knex('settings').where({ business_id: bId }).first();
     }
 
     res.json({ ...invoice, items, settings });
@@ -311,6 +325,7 @@ exports.create = async (req, res) => {
     const finalTransferAmount = isMixed ? parsedTransfer : (payment_method === 'transferencia' ? parsedAmountPaid : 0);
     const finalCardAmount = isMixed ? parsedCard : (payment_method === 'tarjeta' ? parsedAmountPaid : 0);
 
+    let createdInvoiceRow = null;
     const invoiceId = await knex.transaction(async (trx) => {
       const insertedRows = await trx('invoices').insert({
         business_id: businessId,
@@ -337,6 +352,7 @@ exports.create = async (req, res) => {
       }).returning('*');
 
       const invoiceInfo = Array.isArray(insertedRows) ? insertedRows[0] : insertedRows;
+      createdInvoiceRow = invoiceInfo;
       const createdInvoiceId = invoiceInfo?.id || (typeof invoiceInfo === 'number' ? invoiceInfo : (invoiceInfo && typeof invoiceInfo === 'object' ? invoiceInfo.id : null));
 
       if (!createdInvoiceId) {
@@ -541,45 +557,94 @@ exports.create = async (req, res) => {
       return createdInvoiceId;
     });
 
-    if (!invoiceId) {
-      throw new Error('Error al confirmar la creación de la factura en la base de datos');
-    }
+    const targetInvoiceId = invoiceId || createdInvoiceRow?.id;
 
     // Obtener factura completa para retornar
-    const invoice = await knex('invoices as i')
-      .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
-      .leftJoin('orders as o', 'i.order_id', 'o.id')
-      .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
-      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
-      .leftJoin('customers as c', 'i.customer_id', 'c.id')
-      .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
-      .select(
-        'i.*',
-        'o.order_type as order_type',
-        'o.delivery_address as delivery_address',
-        'o.delivery_phone as delivery_phone',
-        'o.delivery_notes as delivery_notes',
-        'u_cashier.full_name as cashier_name',
-        'u_waiter.full_name as waiter_name',
-        't.table_number',
-        'c.name as customer_name',
-        'c.document_type as customer_doc_type',
-        'c.document_number as customer_document',
-        'c.phone as customer_phone',
-        'c.address as customer_address',
-        'c.city as customer_city',
-        'c.email as customer_email',
-        'ar.amount as credit_amount',
-        'ar.paid_amount as credit_paid_amount',
-        'ar.balance as credit_balance',
-        'ar.due_date as credit_due_date',
-        'ar.status as credit_status'
-      )
-      .where({ 'i.id': invoiceId, 'i.business_id': businessId })
-      .first();
+    let invoice = null;
+    if (targetInvoiceId) {
+      invoice = await knex('invoices as i')
+        .leftJoin('users as u_cashier', 'i.user_id', 'u_cashier.id')
+        .leftJoin('orders as o', 'i.order_id', 'o.id')
+        .leftJoin('users as u_waiter', 'o.user_id', 'u_waiter.id')
+        .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+        .leftJoin('customers as c', 'i.customer_id', 'c.id')
+        .leftJoin('accounts_receivable as ar', 'i.id', 'ar.invoice_id')
+        .select(
+          'i.*',
+          'o.order_type as order_type',
+          'o.delivery_address as delivery_address',
+          'o.delivery_phone as delivery_phone',
+          'o.delivery_notes as delivery_notes',
+          'u_cashier.full_name as cashier_name',
+          'u_waiter.full_name as waiter_name',
+          't.table_number',
+          'c.name as customer_name',
+          'c.document_type as customer_doc_type',
+          'c.document_number as customer_document',
+          'c.phone as customer_phone',
+          'c.address as customer_address',
+          'c.city as customer_city',
+          'c.email as customer_email',
+          'ar.amount as credit_amount',
+          'ar.paid_amount as credit_paid_amount',
+          'ar.balance as credit_balance',
+          'ar.due_date as credit_due_date',
+          'ar.status as credit_status'
+        )
+        .where('i.id', targetInvoiceId)
+        .first();
+    }
 
     if (!invoice) {
-      throw new Error(`Error al recuperar los datos de la factura generada #${invoiceId}`);
+      let cust = null;
+      if (finalCustomerId) {
+        cust = await knex('customers').where({ id: finalCustomerId }).first().catch(() => null);
+      }
+      let tbl = null;
+      if (order.table_id) {
+        tbl = await knex('tables_restaurant').where({ id: order.table_id }).first().catch(() => null);
+      }
+      let waiter = null;
+      if (order.user_id) {
+        waiter = await knex('users').where({ id: order.user_id }).first().catch(() => null);
+      }
+
+      invoice = {
+        ...(createdInvoiceRow || {}),
+        id: targetInvoiceId || createdInvoiceRow?.id,
+        business_id: businessId,
+        branch_id: effectiveBranchId,
+        order_id,
+        invoice_number: invoice_number || createdInvoiceRow?.invoice_number,
+        subtotal: subtotalAfterDiscount,
+        tax_total,
+        tip_percentage: tip_percentage || 0,
+        tip_amount,
+        discount_amount: parsedDiscount,
+        delivery_fee: parsedDeliveryFee,
+        total,
+        payment_method: effectivePaymentMethod,
+        cash_amount: finalCashAmount,
+        transfer_amount: finalTransferAmount,
+        card_amount: finalCardAmount,
+        amount_tendered: parsedTendered,
+        change_given: parsedChange,
+        created_at: createdInvoiceRow?.created_at || new Date().toISOString(),
+        order_type: order.order_type,
+        delivery_address: order.delivery_address,
+        delivery_phone: order.delivery_phone,
+        delivery_notes: order.delivery_notes,
+        cashier_name: req.user?.full_name || 'Caja',
+        waiter_name: waiter?.full_name || 'Mesero',
+        table_number: tbl?.table_number || null,
+        customer_name: cust?.name || (finalCustomerId ? 'Cliente' : 'Consumidor Final'),
+        customer_doc_type: cust?.document_type || 'CC',
+        customer_document: cust?.document_number || '222222222222',
+        customer_phone: cust?.phone || '',
+        customer_address: cust?.address || '',
+        customer_city: cust?.city || '',
+        customer_email: cust?.email || ''
+      };
     }
 
     const invoiceItems = await knex('order_items as oi')

@@ -36,9 +36,7 @@ exports.getAll = async (req, res) => {
           table.current_order = order;
         }
       } else {
-        if (table.status !== 'pendiente_pago') {
-          table.status = 'libre';
-        }
+        table.status = 'libre';
         table.current_order = null;
       }
     }

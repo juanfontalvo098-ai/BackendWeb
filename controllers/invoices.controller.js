@@ -464,7 +464,8 @@ exports.create = async (req, res) => {
 
       // 4. Actualizar estado de orden (si hay saldo a crédito pendiente queda 'pendiente_pago', si se pagó completa 'cerrada')
       const targetOrderStatus = parsedCreditAmount > 0 ? 'pendiente_pago' : 'cerrada';
-      await trx('orders').where('id', order_id).update({
+      const parsedOrderId = parseInt(order_id, 10) || order.id;
+      await trx('orders').where('id', parsedOrderId).update({
         status: targetOrderStatus,
         customer_id: finalCustomerId,
         delivery_fee: parsedDeliveryFee,
@@ -476,7 +477,7 @@ exports.create = async (req, res) => {
         await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
       }
 
-      await trx('delivery_assignments').where('order_id', order_id).update({
+      await trx('delivery_assignments').where('order_id', parsedOrderId).update({
         status: 'entregado',
         delivered_at: trx.fn.now()
       });
@@ -671,10 +672,12 @@ exports.create = async (req, res) => {
         req.app.locals.io.to(`business:${businessId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
       }
       if (effectiveBranchId) {
-        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:updated', { order_id });
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:status-changed', { order_id: parsedOrderId, status: targetOrderStatus });
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:updated', { order_id: parsedOrderId, status: targetOrderStatus });
         req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('invoice:created', fullInvoice);
       }
-      req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id });
+      req.app.locals.io.to(`business:${businessId}`).emit('order:status-changed', { order_id: parsedOrderId, status: targetOrderStatus });
+      req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id: parsedOrderId, status: targetOrderStatus });
       req.app.locals.io.to(`business:${businessId}`).emit('invoice:created', fullInvoice);
     }
 

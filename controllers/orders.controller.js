@@ -9,9 +9,14 @@ function emitToBranchAndBusiness(io, branchId, businessId, event, data) {
   try {
     if (branchId) {
       io.to(`branch:${branchId}`).emit(event, data);
-    } else if (businessId) {
+      io.to(`kitchen:${branchId}`).emit(event, data);
+      io.to(`service:${branchId}`).emit(event, data);
+    }
+    if (businessId) {
       io.to(`business:${businessId}`).emit(event, data);
     }
+    // Emisión global para asegurar recepción en terminales de impresión y estaciones
+    io.emit(event, data);
   } catch (e) {
     console.warn(`[SocketIO] Error emit ${event}:`, e.message);
   }

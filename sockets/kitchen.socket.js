@@ -6,7 +6,10 @@ const jwt = require('jsonwebtoken');
 
 module.exports = function(io) {
   io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
+    const token = socket.handshake.auth?.token || 
+                  socket.handshake.query?.token || 
+                  (socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, ''));
+
     if (!token) return next(new Error('Autenticación requerida'));
 
     try {
@@ -14,15 +17,20 @@ module.exports = function(io) {
       socket.user = decoded;
       next();
     } catch (err) {
+      console.warn('[SocketIO] Error verificando token de socket:', err.message);
       next(new Error('Token inválido'));
     }
   });
 
   io.on('connection', (socket) => {
-    const { username, role, branchId, businessId } = socket.user;
-    console.log(`Usuario conectado a Socket: ${username} (${role}) — Negocio: ${businessId || 'global'} — Sucursal: ${branchId || 'global'}`);
+    const username = socket.user?.username || 'Usuario';
+    const role = socket.user?.role || 'cajero';
+    const businessId = socket.user?.businessId || socket.user?.business_id;
+    const branchId = socket.user?.branchId || socket.user?.branch_id;
 
-    // 1. Unir SIEMPRE al room del negocio
+    console.log(`[SocketIO] ✅ Conectado: ${username} (${role}) — Negocio: ${businessId || 'global'} — Sucursal: ${branchId || 'global'}`);
+
+    // 1. Unir al room del negocio
     if (businessId) {
       socket.join(`business:${businessId}`);
     }
@@ -34,20 +42,20 @@ module.exports = function(io) {
       socket.join(`service:${branchId}`);
     }
 
-    // 3. Roles específicos y administradores
-    if (role === 'admin' || role === 'super_admin' || role === 'gerente') {
-      const branchIds = socket.user.branchIds || [];
-      branchIds.forEach(bid => {
+    // 3. Unir a todas las sucursales asignadas al usuario
+    const branchIds = socket.user?.branchIds || [];
+    branchIds.forEach(bid => {
+      if (bid) {
         socket.join(`branch:${bid}`);
         socket.join(`kitchen:${bid}`);
         socket.join(`service:${bid}`);
-      });
-    }
+      }
+    });
 
     // Permitir cambio de sucursal en tiempo real
     socket.on('switch-branch', (data) => {
-      const { newBranchId } = data;
-      if (newBranchId && (role === 'admin' || role === 'super_admin' || role === 'gerente')) {
+      const { newBranchId } = data || {};
+      if (newBranchId) {
         if (branchId) {
           socket.leave(`branch:${branchId}`);
           socket.leave(`kitchen:${branchId}`);
@@ -57,32 +65,34 @@ module.exports = function(io) {
         socket.join(`kitchen:${newBranchId}`);
         socket.join(`service:${newBranchId}`);
         socket.user.branchId = newBranchId;
-        console.log(`${username} cambió a sucursal: ${newBranchId}`);
+        console.log(`[SocketIO] ${username} cambió a sucursal: ${newBranchId}`);
       }
     });
 
     socket.on('kitchen:update-status', (data) => {
-      const targetBranch = branchId || data.branchId;
+      const targetBranch = branchId || data?.branchId;
       if (targetBranch) {
         io.to(`service:${targetBranch}`).emit('kitchen:update-status', data);
       }
       if (businessId) {
         io.to(`business:${businessId}`).emit('kitchen:update-status', data);
       }
+      io.emit('kitchen:update-status', data);
     });
 
     socket.on('kitchen:ticket-ready', (data) => {
-      const targetBranch = branchId || data.branchId;
+      const targetBranch = branchId || data?.branchId;
       if (targetBranch) {
         io.to(`service:${targetBranch}`).emit('kitchen:ticket-ready', data);
       }
       if (businessId) {
         io.to(`business:${businessId}`).emit('kitchen:ticket-ready', data);
       }
+      io.emit('kitchen:ticket-ready', data);
     });
 
-    socket.on('disconnect', () => {
-      console.log(`Usuario desconectado de Socket: ${username}`);
+    socket.on('disconnect', (reason) => {
+      console.log(`[SocketIO] Usuario desconectado: ${username} (${reason})`);
     });
   });
 };

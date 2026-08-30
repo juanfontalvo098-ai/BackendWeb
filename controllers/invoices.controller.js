@@ -671,6 +671,8 @@ exports.create = async (req, res) => {
       req.app.locals.io.to(`business:${businessId}`).emit('order:status-changed', { order_id: parsedOrderId, status: targetOrderStatus });
       req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id: parsedOrderId, status: targetOrderStatus });
       req.app.locals.io.to(`business:${businessId}`).emit('invoice:created', fullInvoice);
+      req.app.locals.io.emit('invoice:created', fullInvoice);
+      req.app.locals.io.emit('order:status-changed', { order_id: parsedOrderId, status: targetOrderStatus });
     }
 
     res.status(201).json(fullInvoice);

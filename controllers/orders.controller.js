@@ -44,6 +44,7 @@ exports.getAll = async (req, res) => {
         'inv.id as invoice_id',
         'inv.invoice_number',
         'inv.total as invoice_total',
+        'inv.third_party_total as invoice_third_party_total',
         'inv.tip_amount as invoice_tip_amount',
         'inv.tip_percentage as invoice_tip_percentage',
         'inv.payment_method as invoice_payment_method',
@@ -79,14 +80,18 @@ exports.getAll = async (req, res) => {
     for (const order of orders) {
       order.items = await knex('order_items as oi')
         .join('products as p', 'oi.product_id', 'p.id')
-        .select('oi.*', 'p.name', 'p.image_url')
+        .select('oi.*', 'p.name', 'p.image_url', 'p.is_third_party as product_is_third_party')
         .where('oi.order_id', order.id);
 
       let itemsTotal = 0;
       let taxTotal = 0;
+      let thirdPartyTotal = 0;
       (order.items || []).forEach(it => {
         const lineTotal = (parseFloat(it.quantity) || 1) * (parseFloat(it.unit_price) || 0);
         itemsTotal += lineTotal;
+        if (it.is_third_party || it.product_is_third_party) {
+          thirdPartyTotal += lineTotal;
+        }
         const rate = parseFloat(it.tax_rate || 0);
         if (rate > 0) {
           if (it.tax_included) {
@@ -102,10 +107,15 @@ exports.getAll = async (req, res) => {
       const deliveryFee = parseFloat(order.delivery_fee || 0);
       const computedSubtotal = Math.max(0, itemsTotal - disc);
       order.items_subtotal = itemsTotal;
+      order.third_party_total = order.invoice_third_party_total !== null && order.invoice_third_party_total !== undefined
+        ? parseFloat(order.invoice_third_party_total)
+        : thirdPartyTotal;
       order.computed_total = computedSubtotal + deliveryFee;
       order.final_total = order.invoice_total !== null && order.invoice_total !== undefined
         ? parseFloat(order.invoice_total)
         : (order.computed_total + (parseFloat(order.invoice_tip_amount) || 0));
+      order.own_final_total = Math.max(0, order.final_total - (order.third_party_total || 0));
+      order.own_computed_total = Math.max(0, order.computed_total - (order.third_party_total || 0));
     }
 
     res.json(orders);
@@ -138,6 +148,7 @@ exports.getById = async (req, res) => {
         'inv.id as invoice_id',
         'inv.invoice_number',
         'inv.total as invoice_total',
+        'inv.third_party_total as invoice_third_party_total',
         'inv.tip_amount as invoice_tip_amount',
         'inv.tip_percentage as invoice_tip_percentage',
         'inv.payment_method as invoice_payment_method',
@@ -156,20 +167,30 @@ exports.getById = async (req, res) => {
 
     order.items = await knex('order_items as oi')
       .join('products as p', 'oi.product_id', 'p.id')
-      .select('oi.*', 'p.name', 'p.image_url')
+      .select('oi.*', 'p.name', 'p.image_url', 'p.is_third_party as product_is_third_party')
       .where('oi.order_id', order.id);
 
     let itemsTotal = 0;
+    let thirdPartyTotal = 0;
     (order.items || []).forEach(it => {
-      itemsTotal += (parseFloat(it.quantity) || 1) * (parseFloat(it.unit_price) || 0);
+      const lineTotal = (parseFloat(it.quantity) || 1) * (parseFloat(it.unit_price) || 0);
+      itemsTotal += lineTotal;
+      if (it.is_third_party || it.product_is_third_party) {
+        thirdPartyTotal += lineTotal;
+      }
     });
     const disc = parseFloat(order.discount_amount || 0);
     const deliveryFee = parseFloat(order.delivery_fee || 0);
     order.items_subtotal = itemsTotal;
+    order.third_party_total = order.invoice_third_party_total !== null && order.invoice_third_party_total !== undefined
+      ? parseFloat(order.invoice_third_party_total)
+      : thirdPartyTotal;
     order.computed_total = Math.max(0, itemsTotal - disc) + deliveryFee;
     order.final_total = order.invoice_total !== null && order.invoice_total !== undefined
       ? parseFloat(order.invoice_total)
       : (order.computed_total + (parseFloat(order.invoice_tip_amount) || 0));
+    order.own_final_total = Math.max(0, order.final_total - (order.third_party_total || 0));
+    order.own_computed_total = Math.max(0, order.computed_total - (order.third_party_total || 0));
 
     res.json(order);
   } catch (err) {

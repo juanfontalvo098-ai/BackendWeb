@@ -1043,3 +1043,36 @@ exports.cleanupEmptyOrder = async (req, res) => {
   }
 };
 
+exports.getKitchenQueue = async (req, res) => {
+  try {
+    const { businessId, branchId, isGlobalScope } = req.tenant;
+    let query = knex('kitchen_tickets as kt')
+      .leftJoin('orders as o', 'kt.order_id', 'o.id')
+      .leftJoin('users as u', 'o.user_id', 'u.id')
+      .leftJoin('customers as c', 'o.customer_id', 'c.id')
+      .select(
+        'kt.*',
+        'o.order_type',
+        'o.delivery_address',
+        'o.delivery_phone',
+        'o.notes as order_notes',
+        'u.full_name as waiter_name',
+        'c.name as customer_name'
+      )
+      .where('kt.business_id', businessId)
+      .where('kt.created_at', '>=', knex.raw("NOW() - INTERVAL '30 minutes'"))
+      .orderBy('kt.id', 'desc')
+      .limit(40);
+
+    if (branchId && !isGlobalScope) {
+      query.andWhere('kt.branch_id', branchId);
+    }
+
+    const tickets = await query;
+    res.json(tickets || []);
+  } catch (err) {
+    console.error('Error al consultar cola de cocina:', err);
+    res.status(500).json({ error: 'Error al consultar cola de cocina', details: err.message });
+  }
+};
+

@@ -9,6 +9,7 @@ router.use(auth);
 router.use(tenantMiddleware);
 
 router.get('/', ordersController.getAll);
+router.get('/kitchen-queue', ordersController.getKitchenQueue);
 router.get('/:id', ordersController.getById);
 
 router.post('/', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.create);

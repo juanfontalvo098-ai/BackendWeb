@@ -231,6 +231,7 @@ exports.create = async (req, res) => {
                   unit_price: item.unit_price !== undefined ? parseFloat(item.unit_price) : parseFloat(prod.price),
                   tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
                   tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+                  is_third_party: Boolean(prod.is_third_party),
                   status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
                   notes: item.notes || null,
                   modifiers_json: modifiersJson,
@@ -324,6 +325,7 @@ exports.create = async (req, res) => {
               unit_price: item.unit_price !== undefined ? Math.max(parseFloat(prod.price), parseFloat(item.unit_price)) : parseFloat(prod.price),
               tax_rate: prod.tax_rate !== undefined ? prod.tax_rate : 0.00,
               tax_included: prod.tax_included !== undefined ? prod.tax_included : true,
+              is_third_party: Boolean(prod.is_third_party),
               status: req.body.send_to_kitchen ? 'enviado_cocina' : 'pendiente',
               notes: item.notes || null,
               modifiers_json: modifiersJson,
@@ -459,6 +461,7 @@ exports.addItems = async (req, res) => {
           unit_price: priceToUse,
           tax_rate: product.tax_rate,
           tax_included: product.tax_included,
+          is_third_party: Boolean(product.is_third_party),
           notes: item.notes || null,
           modifiers_json: modifiersJson
         });

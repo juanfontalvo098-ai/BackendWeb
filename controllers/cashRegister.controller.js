@@ -130,13 +130,15 @@ exports.getShiftSummary = async (req, res) => {
     if (!register) return res.status(404).json({ error: 'No hay caja abierta' });
 
     const invoices = await knex('invoices')
-      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'total', 'cash_amount', 'transfer_amount', 'card_amount')
+      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'total', 'cash_amount', 'transfer_amount', 'card_amount', 'third_party_total')
       .where('cash_register_id', register.id);
 
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0, totalTips = 0;
+    let thirdPartyRevenue = 0;
 
     invoices.forEach(inv => {
       totalTips += parseFloat(inv.tip_amount || 0);
+      thirdPartyRevenue += parseFloat(inv.third_party_total || 0);
       const total = parseFloat(inv.total || 0);
       const cAmt = parseFloat(inv.cash_amount || 0);
       const tAmt = parseFloat(inv.transfer_amount || 0);
@@ -194,6 +196,7 @@ exports.getShiftSummary = async (req, res) => {
       opening_amount: initialFloat,
       cashSales, cashInflows, cashOutflows, cashRefunds, expectedCash,
       cardSales, transferSales, creditSales, totalTips,
+      thirdPartyRevenue,
       audit: {
         canceledOrdersCount: parseInt(auditRow?.canceled_orders_count || 0),
         canceledAmount: parseFloat(auditRow?.canceled_amount || 0)
@@ -224,12 +227,14 @@ exports.close = async (req, res) => {
 
     let grossRevenue = 0, netRevenue = 0, taxTotal = 0, totalTips = 0;
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0;
+    let thirdPartyRevenue = 0;
 
     invoices.forEach(inv => {
       grossRevenue += parseFloat(inv.total || 0);
       netRevenue += parseFloat(inv.subtotal || 0);
       taxTotal += parseFloat(inv.tax_total || 0);
       totalTips += parseFloat(inv.tip_amount || 0);
+      thirdPartyRevenue += parseFloat(inv.third_party_total || 0);
       const total = parseFloat(inv.total || 0);
       const cAmt = parseFloat(inv.cash_amount || 0);
       const tAmt = parseFloat(inv.transfer_amount || 0);
@@ -332,6 +337,7 @@ exports.close = async (req, res) => {
       netRevenue,
       taxTotal,
       totalVoids,
+      thirdPartyRevenue,
       audit: {
         canceledOrdersCount: parseInt(voidRow?.canceled_orders_count || 0),
         canceledAmount: totalVoids
@@ -366,6 +372,7 @@ exports.close = async (req, res) => {
         transfer_sales: transferSales,
         total_withdrawals: cashOutflows,
         total_voids: totalVoids,
+        third_party_revenue: thirdPartyRevenue,
         snapshot_json: JSON.stringify(snapshot)
       });
     } catch (e) {

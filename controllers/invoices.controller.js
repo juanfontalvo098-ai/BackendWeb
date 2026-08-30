@@ -214,16 +214,23 @@ exports.create = async (req, res) => {
     const effectiveBranchId = branchId || order.branch_id || register.branch_id;
 
     const items = await knex('order_items')
-      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included')
+      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included', 'is_third_party')
       .where('order_id', order_id);
     if (items.length === 0) return res.status(400).json({ error: 'La orden no tiene ítems' });
 
     let subtotal = 0, tax_total = 0;
+    let thirdPartyTotal = 0; // Total de ítems de productos de terceros/socios
 
     items.forEach(item => {
       const rate = parseFloat(item.tax_rate || 0);
       const qty = parseFloat(item.quantity) || 1;
       const lineTotal = qty * parseFloat(item.unit_price || 0);
+
+      // Acumular total de terceros (línea completa incluyendo impuestos)
+      if (item.is_third_party) {
+        thirdPartyTotal += lineTotal;
+      }
+
       if (item.tax_included && rate > 0) {
         const itemSub = lineTotal / (1 + rate);
         subtotal += itemSub;
@@ -235,6 +242,7 @@ exports.create = async (req, res) => {
         subtotal += lineTotal;
       }
     });
+
 
     const parsedDiscount = parseFloat(discount_amount || order.discount_amount || 0);
     const parsedDeliveryFee = parseFloat(req.body.delivery_fee !== undefined ? req.body.delivery_fee : (order.delivery_fee || 0));
@@ -344,6 +352,7 @@ exports.create = async (req, res) => {
         discount_amount: parsedDiscount,
         delivery_fee: parsedDeliveryFee,
         total,
+        third_party_total: thirdPartyTotal,
         payment_method: effectivePaymentMethod,
         cash_amount: finalCashAmount,
         transfer_amount: finalTransferAmount,

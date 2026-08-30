@@ -78,6 +78,7 @@ exports.getMetrics = async (req, res) => {
         knex.raw('COALESCE(SUM(i.tip_amount), 0) as total_tips'),
         knex.raw('COALESCE(SUM(i.discount_amount), 0) as total_discounts'),
         knex.raw('COALESCE(SUM(i.delivery_fee), 0) as total_delivery_fees'),
+        knex.raw('COALESCE(SUM(i.third_party_total), 0) as third_party_sales'),
         knex.raw('COUNT(i.id) as total_tickets'),
         knex.raw('COALESCE(AVG(i.total), 0) as avg_ticket')
       );
@@ -373,6 +374,8 @@ exports.getMetrics = async (req, res) => {
         total_tips: parseFloat(heroKpis.total_tips || 0),
         total_discounts: parseFloat(heroKpis.total_discounts || 0),
         total_delivery_fees: parseFloat(heroKpis.total_delivery_fees || 0),
+        third_party_sales: parseFloat(heroKpis.third_party_sales || 0),
+        own_gross_sales: parseFloat(heroKpis.gross_sales || 0) - parseFloat(heroKpis.third_party_sales || 0),
         total_tickets: parseInt(heroKpis.total_tickets || 0),
         avg_ticket: parseFloat(heroKpis.avg_ticket || 0),
         occupancy_rate: occupancyRate,

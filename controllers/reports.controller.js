@@ -103,7 +103,7 @@ exports.getShifts = async (req, res) => {
       .select('id', 'cash_register_id', 'user_id', 'user_name', 'shift_name', 'opened_at', 'closed_at',
         'opening_amount', 'closing_amount', 'expected_amount', 'difference', 'gross_revenue', 'net_revenue',
         'tax_total', 'total_tips', 'total_tickets', 'cash_sales', 'card_sales', 'transfer_sales',
-        'total_withdrawals', 'total_voids', 'created_at')
+        'total_withdrawals', 'total_voids', 'third_party_revenue', 'created_at')
       .where('business_id', businessId);
 
     if (branchId && !isGlobalScope) {
@@ -283,15 +283,29 @@ exports.exportShiftExcel = async (req, res) => {
     const rowTitle3 = sheet1.addRow(['3. COSTEO, IMPUESTOS Y UTILIDAD OPERATIVA DEL TURNO']);
     rowTitle3.getCell(1).font = { bold: true, size: 12, color: { argb: 'FF0F172A' } };
 
+    const thirdPartyRev = parseFloat(shift.third_party_revenue || 0);
     const netRev = parseFloat(shift.net_revenue || 0);
+    const ownNetRev = Math.max(0, netRev - thirdPartyRev);
     const suppCost = suppliesData.totalSuppliesCost || 0;
-    const grossProfit = Math.max(0, netRev - suppCost);
-    const profitMargin = netRev > 0 ? ((grossProfit / netRev) * 100).toFixed(1) : 0;
+    const grossProfit = Math.max(0, ownNetRev - suppCost);
+    const profitMargin = ownNetRev > 0 ? ((grossProfit / ownNetRev) * 100).toFixed(1) : 0;
 
     const rNet = sheet1.addRow(['Ventas Netas (Sin Impuestos):', netRev, 'Impuestos Recaudados:', parseFloat(shift.tax_total || 0)]);
     const rSupp = sheet1.addRow(['Costo Insumos Consumidos (Recetas):', suppCost, 'Propinas Recaudadas:', parseFloat(shift.total_tips || 0)]);
     const rProf = sheet1.addRow(['Ganancia Bruta Operativa Estimada:', grossProfit, 'Margen Bruto Operativo:', `${profitMargin}%`]);
     const rWith = sheet1.addRow(['Egresos y Retiros de Caja:', parseFloat(shift.total_withdrawals || 0), 'Valor en Anulaciones:', parseFloat(shift.total_voids || 0)]);
+
+    // Fila de ventas de terceros (si hay)
+    if (thirdPartyRev > 0) {
+      const rThird = sheet1.addRow(['Ventas de Terceros/Socios (No Contabilizadas):', thirdPartyRev, 'Ventas Propias Netas:', ownNetRev]);
+      rThird.getCell(2).numFmt = '"$"#,##0';
+      rThird.getCell(4).numFmt = '"$"#,##0';
+      rThird.font = { bold: true, color: { argb: 'FFD97706' } };
+      rThird.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
+      rThird.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
+      rThird.getCell(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
+      rThird.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
+    }
 
     [rNet, rSupp, rProf, rWith].forEach(r => {
       r.getCell(2).numFmt = '"$"#,##0';

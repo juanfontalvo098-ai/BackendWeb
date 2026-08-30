@@ -54,7 +54,7 @@ exports.create = async (req, res) => {
     const {
       name, price, cost_price, barcode, sku, unit_of_measure,
       track_inventory, min_stock, tax_rate, tax_included, category_id,
-      description, image_url, branch_id, show_in_order_stats
+      description, image_url, branch_id, show_in_order_stats, is_third_party
     } = req.body;
 
     if (!name || price === undefined || price === null || !category_id) {
@@ -86,7 +86,8 @@ exports.create = async (req, res) => {
       tax_rate: (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) ? parseFloat(tax_rate) : 0.0,
       tax_included: tax_included !== undefined ? Boolean(tax_included) : true,
       image_url: image_url || null,
-      show_in_order_stats: show_in_order_stats !== undefined ? Boolean(show_in_order_stats) : false
+      show_in_order_stats: show_in_order_stats !== undefined ? Boolean(show_in_order_stats) : false,
+      is_third_party: is_third_party !== undefined ? Boolean(is_third_party) : false
     }).returning('*');
 
     // Si track_inventory es true y hay sucursal activa, inicializar registro de inventario en 0
@@ -127,7 +128,7 @@ exports.update = async (req, res) => {
     const {
       name, price, cost_price, barcode, sku, unit_of_measure,
       track_inventory, min_stock, tax_rate, tax_included,
-      category_id, description, image_url, show_in_order_stats
+      category_id, description, image_url, show_in_order_stats, is_third_party
     } = req.body;
 
     const updateData = {};
@@ -159,6 +160,7 @@ exports.update = async (req, res) => {
     if (description !== undefined) updateData.description = description || null;
     if (image_url !== undefined) updateData.image_url = image_url || null;
     if (show_in_order_stats !== undefined) updateData.show_in_order_stats = Boolean(show_in_order_stats);
+    if (is_third_party !== undefined) updateData.is_third_party = Boolean(is_third_party);
 
     updateData.updated_at = knex.fn.now();
 

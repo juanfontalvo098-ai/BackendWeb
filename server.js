@@ -55,12 +55,14 @@ app.locals.io = io;
 require('./sockets/kitchen.socket')(io);
 
 // Middlewares
-app.use(cors({
+const corsOptions = {
   origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Branch-Id', 'x-branch-id', 'Accept', 'Origin', 'X-Requested-With']
-}));
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(helmet({
   crossOriginResourcePolicy: false,
@@ -179,30 +181,32 @@ if (fs.existsSync(indexPath)) {
 
 const PORT = process.env.PORT || 3001;
 
-(async () => {
-  try {
-    // Ejecutar migraciones de Knex automáticamente
-    console.log('Ejecutando migraciones de base de datos...');
-    await knex.migrate.latest();
-    console.log('✅ Migraciones completadas.');
+// En entornos serverless (Vercel) no ejecutamos server.listen ni bloqueos de migración en cold-start
+if (!process.env.VERCEL) {
+  (async () => {
+    try {
+      // Ejecutar migraciones de Knex automáticamente
+      console.log('Ejecutando migraciones de base de datos...');
+      await knex.migrate.latest();
+      console.log('✅ Migraciones completadas.');
 
-    // Verificar si hay datos, si no, ejecutar seeds
-    const businessCount = await knex('businesses').count('id as count').first();
-    if (parseInt(businessCount.count) === 0) {
-      console.log('Base de datos vacía. Ejecutando seeds...');
-      await knex.seed.run();
-      console.log('✅ Seeds completados.');
+      // Verificar si hay datos, si no, ejecutar seeds
+      const businessCount = await knex('businesses').count('id as count').first();
+      if (parseInt(businessCount?.count || 0) === 0) {
+        console.log('Base de datos vacía. Ejecutando seeds...');
+        await knex.seed.run();
+        console.log('✅ Seeds completados.');
+      }
+
+      server.listen(PORT, () => {
+        console.log(`✅ Servidor POS Multi-tenant iniciado en el puerto ${PORT}`);
+        console.log(`   API: http://localhost:${PORT}/api`);
+        console.log(`   SPA: http://localhost:${PORT}`);
+      });
+    } catch (err) {
+      console.error('❌ Error al inicializar la base de datos:', err);
     }
-
-    server.listen(PORT, () => {
-      console.log(`✅ Servidor POS Multi-tenant iniciado en el puerto ${PORT}`);
-      console.log(`   API: http://localhost:${PORT}/api`);
-      console.log(`   SPA: http://localhost:${PORT}`);
-    });
-  } catch (err) {
-    console.error('❌ Error al inicializar la base de datos:', err);
-    process.exit(1);
-  }
-})();
+  })();
+}
 
 module.exports = app;

@@ -644,11 +644,27 @@ exports.updateOrder = async (req, res) => {
           await trx('orders').where('id', id).update({ status: 'en_preparacion' });
         }
       }
+
+      // Garantizar que la mesa quede marcada como 'ocupada' si la orden tiene mesa y tiene ítems
+      const resolvedTableId = table_id !== undefined ? table_id : order.table_id;
+      if (resolvedTableId) {
+        const finalItemsCount = await trx('order_items').where('order_id', id).count('id as count').first();
+        if (parseInt(finalItemsCount.count) > 0) {
+          await trx('tables_restaurant').where({ id: resolvedTableId, business_id: businessId }).update({ status: 'ocupada' });
+        }
+      }
     });
 
     if (req.app && req.app.locals && req.app.locals.io) {
       const io = req.app.locals.io;
       emitToBranchAndBusiness(io, order.branch_id, businessId, 'order:updated', { order_id: id });
+
+      // Emitir cambio de estado de mesa para que TablesPage se actualice
+      const resolvedTableId = table_id !== undefined ? table_id : order.table_id;
+      if (resolvedTableId) {
+        emitToBranchAndBusiness(io, order.branch_id, businessId, 'table:status-changed', { table_id: resolvedTableId, status: 'ocupada' });
+      }
+
       if (send_to_kitchen && newlyAddedItems.length > 0) {
         const tableDisplay = order.table_number ? `Mesa ${order.table_number}` : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
         const itemsJson = newlyAddedItems.map(i => ({

@@ -934,8 +934,9 @@ exports.sendToKitchen = async (req, res) => {
 
 exports.cancelOrder = async (req, res) => {
   const { id } = req.params;
-  const { reason } = req.body;
+  const { reason, restore_stock = true } = req.body || {};
   const { businessId } = req.tenant;
+  const userId = req.user?.id;
 
   try {
     const order = await knex('orders')
@@ -943,16 +944,78 @@ exports.cancelOrder = async (req, res) => {
       .first();
 
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
-    if (order.status === 'cerrada') return res.status(400).json({ error: 'La orden ya está cerrada y facturada' });
+
+    // Buscar si tiene factura emitida
+    const invoice = await knex('invoices')
+      .where({ order_id: id, business_id: businessId })
+      .first();
 
     await knex.transaction(async (trx) => {
+      // 1. Si tenía factura, revertir movimientos de caja y cuentas por cobrar
+      if (invoice) {
+        await trx('cash_movements')
+          .where('cash_register_id', invoice.cash_register_id)
+          .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
+          .del();
+
+        await trx('accounts_receivable')
+          .where({ invoice_id: invoice.id })
+          .del();
+
+        try {
+          await trx('electronic_invoices').where({ invoice_id: invoice.id }).del();
+        } catch (e) {}
+
+        // Restaurar inventario si se solicita
+        if (restore_stock) {
+          const orderItems = await trx('order_items').where('order_id', order.id);
+          for (const item of orderItems) {
+            const prod = await trx('products').where('id', item.product_id).first();
+            if (prod && prod.track_inventory) {
+              const inv = await trx('inventory')
+                .where({ product_id: item.product_id, branch_id: order.branch_id })
+                .first();
+              if (inv) {
+                const prevQty = parseFloat(inv.quantity || 0);
+                const restoreQty = parseFloat(item.quantity || 1);
+                const newQty = prevQty + restoreQty;
+                await trx('inventory').where('id', inv.id).update({
+                  quantity: newQty,
+                  updated_at: knex.fn.now()
+                });
+                await trx('inventory_movements').insert({
+                  business_id: businessId,
+                  branch_id: order.branch_id,
+                  product_id: item.product_id,
+                  inventory_id: inv.id,
+                  user_id: userId,
+                  movement_type: 'devolucion',
+                  quantity: restoreQty,
+                  previous_stock: prevQty,
+                  new_stock: newQty,
+                  unit_cost: parseFloat(prod.cost_price || 0),
+                  total_cost: restoreQty * parseFloat(prod.cost_price || 0),
+                  reference_id: invoice.id,
+                  reference_type: 'anulacion_factura',
+                  notes: `Reversión por anulación de Orden #${order.id}`
+                });
+              }
+            }
+          }
+        }
+
+        // Eliminar factura
+        await trx('invoices').where('id', invoice.id).del();
+      }
+
+      // 2. Actualizar estado de la orden a 'cancelada' (manteniendo los ítems para auditoría)
       await trx('orders').where('id', id).update({
         status: 'cancelada',
-        notes: reason ? `Cancelada: ${reason}` : 'Anulada por el usuario',
+        notes: reason ? `Cancelada: ${reason}` : (invoice ? `Factura #${invoice.invoice_number} Anulada` : 'Anulada por el usuario'),
         updated_at: knex.fn.now()
       });
-      await trx('order_items').where('order_id', id).del();
-      await trx('kitchen_tickets').where('order_id', id).del();
+
+      // 3. Liberar la mesa si aplica
       if (order.table_id) {
         await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
       }
@@ -967,10 +1030,10 @@ exports.cancelOrder = async (req, res) => {
       req.app.locals.io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
     }
 
-    res.json({ message: 'Orden cancelada / anulada exitosamente' });
+    res.json({ message: invoice ? `Factura #${invoice.invoice_number} y orden anuladas exitosamente` : 'Orden cancelada exitosamente' });
   } catch (err) {
     console.error('Error al cancelar la orden:', err);
-    res.status(500).json({ error: 'Error al cancelar la orden' });
+    res.status(500).json({ error: 'Error al cancelar la orden: ' + err.message });
   }
 };
 

@@ -98,13 +98,18 @@ exports.getById = async (req, res) => {
       .select('si.*', 'b.name as branch_name')
       .where({ 'si.supply_id': id, 'si.business_id': businessId });
 
-    // Últimos movimientos del insumo
-    const movements = await knex('supplies_movements as sm')
+    // Últimos movimientos del insumo (sanitizando notas legadas con #undefined)
+    const rawMovements = await knex('supplies_movements as sm')
       .leftJoin('users as u', 'sm.user_id', 'u.id')
       .select('sm.*', 'u.full_name as user_name')
       .where('sm.supply_id', id)
       .orderBy('sm.id', 'desc')
       .limit(20);
+
+    const movements = rawMovements.map(m => ({
+      ...m,
+      notes: m.notes ? m.notes.replace(/#undefined/gi, '#POS').replace(/\bundefined\b/gi, 'POS') : m.notes
+    }));
 
     res.json({ ...supply, stocks, movements });
   } catch (err) {
@@ -375,7 +380,11 @@ exports.getMovements = async (req, res) => {
 
     query.orderBy('sm.id', 'desc').limit(parseInt(limit, 10) || 100);
 
-    const movements = await query;
+    const rawMovements = await query;
+    const movements = rawMovements.map(m => ({
+      ...m,
+      notes: m.notes ? m.notes.replace(/#undefined/gi, '#POS').replace(/\bundefined\b/gi, 'POS') : m.notes
+    }));
     res.json(movements);
   } catch (err) {
     console.error('Error al obtener movimientos de insumos:', err);

@@ -473,23 +473,28 @@ async function deductSingleProduct(trx, { businessId, branchId, productId, quant
 }
 
 // Descontar inventario al facturar (soporta argumentos posicionales u objeto)
-exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
-  let businessId, branchId, invoiceId, items, userId;
+exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6, arg7) => {
+  let businessId, branchId, invoiceId, items, userId, invoiceNumber;
   if (typeof arg2 === 'object' && !Array.isArray(arg2) && arg2 !== null && arg2.businessId) {
     businessId = arg2.businessId;
     branchId = arg2.branchId;
-    invoiceId = arg2.invoiceId;
+    invoiceId = arg2.invoiceId || arg2.invoice_id;
+    invoiceNumber = arg2.invoiceNumber || arg2.invoice_number;
     items = arg2.items;
-    userId = arg2.userId;
+    userId = arg2.userId || arg2.user_id;
   } else {
     businessId = arg2;
     branchId = arg3;
     items = arg4;
     userId = arg5;
     invoiceId = arg6;
+    invoiceNumber = arg7;
   }
 
   if (!items || !Array.isArray(items)) return;
+
+  const invLabel = invoiceNumber || (invoiceId ? `${invoiceId}` : '');
+  const invoiceTag = invLabel ? (invLabel.startsWith('#') ? invLabel : `#${invLabel}`) : 'POS';
 
   for (const item of items) {
     const prodId = item.product_id || item.productId || item.id;
@@ -514,7 +519,7 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
             quantity: neededSupplyQty,
             invoiceId,
             userId,
-            notes: `Deducción por Factura #${invoiceId} (Receta base)`
+            notes: `Deducción por Factura ${invoiceTag} (Receta base)`
           });
         }
       }
@@ -567,7 +572,7 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
                 quantity: neededSupplyQty,
                 invoiceId,
                 userId,
-                notes: `Deducción por Factura #${invoiceId} (Sabor/Topping: ${mod.name || 'Modificador'} x${modQty})`
+                notes: `Deducción por Factura ${invoiceTag} (Sabor/Topping: ${mod.name || 'Modificador'} x${modQty})`
               });
             }
           }

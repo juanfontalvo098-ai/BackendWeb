@@ -469,7 +469,14 @@ exports.create = async (req, res) => {
 
       // 3. Descontar inventario automáticamente
       try {
-        await deductStockForInvoice(trx, businessId, effectiveBranchId, items, user_id);
+        await deductStockForInvoice(trx, {
+          businessId,
+          branchId: effectiveBranchId,
+          invoiceId: createdInvoiceId,
+          invoiceNumber: invoice_number,
+          items,
+          userId: user_id
+        });
       } catch (invErr) {
         console.warn('Advertencia al descontar inventario:', invErr.message);
       }

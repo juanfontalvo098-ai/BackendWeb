@@ -399,7 +399,7 @@ exports.transfer = exports.transferStock;
 // ==================== DEDUCCIÓN AUTOMÁTICA ====================
 
 // Descontar inventario de insumo
-async function deductSingleSupply(trx, { businessId, branchId, supplyId, quantity, invoiceId, userId }) {
+async function deductSingleSupply(trx, { businessId, branchId, supplyId, quantity, invoiceId, userId, notes }) {
   let inv = await trx('supplies_inventory')
     .where({ branch_id: branchId, supply_id: supplyId })
     .first();
@@ -429,7 +429,7 @@ async function deductSingleSupply(trx, { businessId, branchId, supplyId, quantit
     quantity: -deductQty,
     unit_cost: supply ? parseFloat(supply.cost_price || 0) : 0,
     balance_after: newBalance,
-    notes: `Deducción automática por Factura #${invoiceId}`,
+    notes: notes || `Deducción automática por Factura #${invoiceId}`,
     user_id: userId
   });
 }
@@ -497,6 +497,7 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
 
     const itemQty = parseFloat(item.quantity) || 1;
 
+    // 1. Descontar insumos de la receta base fija (si el producto tiene receta)
     const recipe = await trx('recipes')
       .where({ product_id: prodId, business_id: businessId })
       .first();
@@ -512,7 +513,8 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
             supplyId: rItem.supply_id,
             quantity: neededSupplyQty,
             invoiceId,
-            userId
+            userId,
+            notes: `Deducción por Factura #${invoiceId} (Receta base)`
           });
         }
       }
@@ -527,7 +529,7 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
       });
     }
 
-    // Descontar insumos de modificadores, sabores y toppings seleccionados
+    // 2. Descontar insumos de modificadores, sabores y toppings seleccionados para este ítem
     const rawModifiers = item.modifiers_json || item.modifiers;
     if (rawModifiers) {
       let parsedModifiers = [];
@@ -539,17 +541,33 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6) => {
 
       if (Array.isArray(parsedModifiers)) {
         for (const mod of parsedModifiers) {
-          if (mod.supply_id && mod.supply_quantity) {
+          let supplyId = mod.supply_id ? parseInt(mod.supply_id, 10) : null;
+          let supplyQuantity = parseFloat(mod.supply_quantity) || 0;
+
+          // Si el modificador no tiene supply_id directo en el snapshot, buscarlo en la base de datos
+          if (!supplyId && (mod.option_id || mod.id)) {
+            const optId = mod.option_id || mod.id;
+            const dbOption = await trx('product_modifier_options').where('id', optId).first();
+            if (dbOption && dbOption.supply_id) {
+              supplyId = parseInt(dbOption.supply_id, 10);
+              if (supplyQuantity <= 0 && dbOption.supply_quantity) {
+                supplyQuantity = parseFloat(dbOption.supply_quantity);
+              }
+            }
+          }
+
+          if (supplyId && supplyQuantity > 0) {
             const modQty = parseFloat(mod.quantity || 1);
-            const neededSupplyQty = (parseFloat(mod.supply_quantity) || 0) * modQty * itemQty;
+            const neededSupplyQty = supplyQuantity * modQty * itemQty;
             if (neededSupplyQty > 0) {
               await deductSingleSupply(trx, {
                 businessId,
                 branchId,
-                supplyId: mod.supply_id,
+                supplyId,
                 quantity: neededSupplyQty,
                 invoiceId,
-                userId
+                userId,
+                notes: `Deducción por Factura #${invoiceId} (Sabor/Topping: ${mod.name || 'Modificador'} x${modQty})`
               });
             }
           }

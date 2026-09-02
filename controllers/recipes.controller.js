@@ -31,14 +31,34 @@ exports.getAll = async (req, res) => {
         )
         .where('ri.recipe_id', recipe.id);
 
-      // Calcular costo total de la receta sumando el costo de cada insumo
+      // Cargar grupos de modificadores / sabores vinculados a este producto
+      const modifierGroups = await knex('product_modifier_groups as pmg')
+        .where({ 'pmg.product_id': recipe.product_id, 'pmg.business_id': businessId })
+        .orderBy('pmg.display_order', 'asc');
+
+      for (const group of modifierGroups) {
+        group.options = await knex('product_modifier_options as pmo')
+          .leftJoin('supplies as s', 'pmo.supply_id', 's.id')
+          .select(
+            'pmo.*',
+            's.name as supply_name',
+            's.unit_of_measure as supply_unit',
+            's.cost_price as supply_cost'
+          )
+          .where('pmo.group_id', group.id)
+          .orderBy('pmo.display_order', 'asc');
+      }
+
+      recipe.modifier_groups = modifierGroups;
+
+      // Calcular costo total de la receta sumando el costo de cada insumo base
       recipe.total_cost = recipe.ingredients.reduce((sum, ing) => {
         const qty = parseFloat(ing.quantity || 0);
         const cost = parseFloat(ing.unit_cost || 0);
         return sum + (qty * cost);
       }, 0);
 
-      // Margen de ganancia
+      // Margen de ganancia base
       const price = parseFloat(recipe.price || 0);
       recipe.profit_margin = price > 0 ? ((price - recipe.total_cost) / price) * 100 : 0;
     }
@@ -75,6 +95,25 @@ exports.getById = async (req, res) => {
         's.category as supply_category'
       )
       .where('ri.recipe_id', recipe.id);
+
+    const modifierGroups = await knex('product_modifier_groups as pmg')
+      .where({ 'pmg.product_id': recipe.product_id, 'pmg.business_id': businessId })
+      .orderBy('pmg.display_order', 'asc');
+
+    for (const group of modifierGroups) {
+      group.options = await knex('product_modifier_options as pmo')
+        .leftJoin('supplies as s', 'pmo.supply_id', 's.id')
+        .select(
+          'pmo.*',
+          's.name as supply_name',
+          's.unit_of_measure as supply_unit',
+          's.cost_price as supply_cost'
+        )
+        .where('pmo.group_id', group.id)
+        .orderBy('pmo.display_order', 'asc');
+    }
+
+    recipe.modifier_groups = modifierGroups;
 
     recipe.total_cost = recipe.ingredients.reduce((sum, ing) => {
       const qty = parseFloat(ing.quantity || 0);

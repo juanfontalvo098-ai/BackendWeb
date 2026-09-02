@@ -214,7 +214,7 @@ exports.create = async (req, res) => {
     const effectiveBranchId = branchId || order.branch_id || register.branch_id;
 
     const items = await knex('order_items')
-      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included', 'is_third_party')
+      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included', 'is_third_party', 'modifiers_json')
       .where('order_id', order_id);
     if (items.length === 0) return res.status(400).json({ error: 'La orden no tiene ítems' });
 

@@ -56,16 +56,58 @@ exports.getAll = async (req, res) => {
 
       recipe.modifier_groups = modifierGroups;
 
-      // Calcular costo total de la receta sumando el costo de cada insumo base
-      recipe.total_cost = recipe.ingredients.reduce((sum, ing) => {
+      // 1. Costo base fijo de los ingredientes de la receta
+      const baseCost = recipe.ingredients.reduce((sum, ing) => {
         const qty = parseFloat(ing.quantity || 0);
         const cost = parseFloat(ing.unit_cost || 0);
         return sum + (qty * cost);
       }, 0);
 
-      // Margen de ganancia base
+      // 2. Costo de modificadores / sabores OBLIGATORIOS (se deben elegir sí o sí en la venta)
+      let reqModCostMin = 0;
+      let reqModCostMax = 0;
+      let reqModCostAvg = 0;
+      let hasRequiredModifiers = false;
+
+      for (const group of modifierGroups) {
+        if (group.is_required && Array.isArray(group.options) && group.options.length > 0) {
+          const optionsCosts = group.options
+            .map(opt => {
+              const qty = parseFloat(opt.supply_quantity || 0);
+              const cost = parseFloat(opt.supply_cost || 0);
+              return qty * cost;
+            })
+            .filter(c => c > 0);
+
+          if (optionsCosts.length > 0) {
+            hasRequiredModifiers = true;
+            const minC = Math.min(...optionsCosts);
+            const maxC = Math.max(...optionsCosts);
+            const avgC = optionsCosts.reduce((a, b) => a + b, 0) / optionsCosts.length;
+            const minSel = group.min_selectable || 1;
+            reqModCostMin += minC * minSel;
+            reqModCostMax += maxC * minSel;
+            reqModCostAvg += avgC * minSel;
+          }
+        }
+      }
+
+      recipe.base_cost = baseCost;
+      recipe.required_modifiers_cost = reqModCostAvg;
+      recipe.required_modifiers_cost_min = reqModCostMin;
+      recipe.required_modifiers_cost_max = reqModCostMax;
+      recipe.has_required_modifiers = hasRequiredModifiers;
+
+      // Costo total efectivo incluyendo insumos base + modificadores obligatorios
+      recipe.total_cost = baseCost + reqModCostAvg;
+      recipe.total_cost_min = baseCost + reqModCostMin;
+      recipe.total_cost_max = baseCost + reqModCostMax;
+
+      // Margen de ganancia efectivo con modificadores obligatorios
       const price = parseFloat(recipe.price || 0);
       recipe.profit_margin = price > 0 ? ((price - recipe.total_cost) / price) * 100 : 0;
+      recipe.profit_margin_min = price > 0 ? ((price - recipe.total_cost_max) / price) * 100 : 0;
+      recipe.profit_margin_max = price > 0 ? ((price - recipe.total_cost_min) / price) * 100 : 0;
     }
 
     res.json(recipes);
@@ -125,14 +167,54 @@ exports.getById = async (req, res) => {
 
     recipe.modifier_groups = modifierGroups;
 
-    recipe.total_cost = recipe.ingredients.reduce((sum, ing) => {
+    const baseCost = recipe.ingredients.reduce((sum, ing) => {
       const qty = parseFloat(ing.quantity || 0);
       const cost = parseFloat(ing.unit_cost || 0);
       return sum + (qty * cost);
     }, 0);
 
+    let reqModCostMin = 0;
+    let reqModCostMax = 0;
+    let reqModCostAvg = 0;
+    let hasRequiredModifiers = false;
+
+    for (const group of modifierGroups) {
+      if (group.is_required && Array.isArray(group.options) && group.options.length > 0) {
+        const optionsCosts = group.options
+          .map(opt => {
+            const qty = parseFloat(opt.supply_quantity || 0);
+            const cost = parseFloat(opt.supply_cost || 0);
+            return qty * cost;
+          })
+          .filter(c => c > 0);
+
+        if (optionsCosts.length > 0) {
+          hasRequiredModifiers = true;
+          const minC = Math.min(...optionsCosts);
+          const maxC = Math.max(...optionsCosts);
+          const avgC = optionsCosts.reduce((a, b) => a + b, 0) / optionsCosts.length;
+          const minSel = group.min_selectable || 1;
+          reqModCostMin += minC * minSel;
+          reqModCostMax += maxC * minSel;
+          reqModCostAvg += avgC * minSel;
+        }
+      }
+    }
+
+    recipe.base_cost = baseCost;
+    recipe.required_modifiers_cost = reqModCostAvg;
+    recipe.required_modifiers_cost_min = reqModCostMin;
+    recipe.required_modifiers_cost_max = reqModCostMax;
+    recipe.has_required_modifiers = hasRequiredModifiers;
+
+    recipe.total_cost = baseCost + reqModCostAvg;
+    recipe.total_cost_min = baseCost + reqModCostMin;
+    recipe.total_cost_max = baseCost + reqModCostMax;
+
     const price = parseFloat(recipe.price || 0);
     recipe.profit_margin = price > 0 ? ((price - recipe.total_cost) / price) * 100 : 0;
+    recipe.profit_margin_min = price > 0 ? ((price - recipe.total_cost_max) / price) * 100 : 0;
+    recipe.profit_margin_max = price > 0 ? ((price - recipe.total_cost_min) / price) * 100 : 0;
 
     res.json(recipe);
   } catch (err) {

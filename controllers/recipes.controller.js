@@ -47,6 +47,11 @@ exports.getAll = async (req, res) => {
           )
           .where('pmo.group_id', group.id)
           .orderBy('pmo.display_order', 'asc');
+
+        for (const opt of group.options) {
+          opt.supply_quantity = parseFloat(parseFloat(opt.supply_quantity || 0).toFixed(1));
+          opt.price_modifier = parseFloat(parseFloat(opt.price_modifier || 0).toFixed(0));
+        }
       }
 
       recipe.modifier_groups = modifierGroups;
@@ -111,6 +116,11 @@ exports.getById = async (req, res) => {
         )
         .where('pmo.group_id', group.id)
         .orderBy('pmo.display_order', 'asc');
+
+      for (const opt of group.options) {
+        opt.supply_quantity = parseFloat(parseFloat(opt.supply_quantity || 0).toFixed(1));
+        opt.price_modifier = parseFloat(parseFloat(opt.price_modifier || 0).toFixed(0));
+      }
     }
 
     recipe.modifier_groups = modifierGroups;

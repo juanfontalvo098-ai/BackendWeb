@@ -1,5 +1,5 @@
 const knex = require('../database/knex');
-const { deductStockForInvoice } = require('./inventory.controller');
+const { deductStockForInvoice, restoreStockForInvoice } = require('./inventory.controller');
 
 exports.getAll = async (req, res) => {
   try {
@@ -705,165 +705,106 @@ exports.remove = async (req, res) => {
       .where({ id: invoice.order_id, business_id: businessId })
       .first();
 
+    const effectiveBranchId = invoice.branch_id || order?.branch_id;
+    const effectiveUserId = userId || invoice.user_id || order?.user_id || 1;
+
     await knex.transaction(async (trx) => {
       // 1. Eliminar movimientos de caja vinculados a esta factura
-      await trx('cash_movements')
-        .where('cash_register_id', invoice.cash_register_id)
-        .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
-        .del();
+      if (invoice.cash_register_id) {
+        await trx('cash_movements')
+          .where('cash_register_id', invoice.cash_register_id)
+          .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
+          .del();
+      } else {
+        await trx('cash_movements')
+          .where('description', 'like', `%Factura ${invoice.invoice_number}%`)
+          .del();
+      }
 
-      // 2. Eliminar cuentas por cobrar vinculadas
-      await trx('accounts_receivable')
-        .where({ invoice_id: id })
-        .del();
-
-      // 3. Eliminar registros de factura electrónica asociados si hubieran
-      try {
-        await trx('electronic_invoices').where({ invoice_id: id }).del();
-      } catch (e) {}
-
-      // 4. Restaurar inventario y Kardex si restore_stock está activo
-      if (restore_stock && order) {
-        const orderItems = await trx('order_items').where('order_id', order.id);
-        for (const item of orderItems) {
-          // A. Producto directo con control de inventario
-          const prod = await trx('products').where('id', item.product_id).first();
-          if (prod && prod.track_inventory) {
-            const inv = await trx('inventory')
-              .where({ product_id: item.product_id, branch_id: invoice.branch_id })
-              .first();
-            if (inv) {
-              const prevQty = parseFloat(inv.quantity || 0);
-              const restoreQty = parseFloat(item.quantity || 1);
-              const newQty = prevQty + restoreQty;
-              await trx('inventory').where('id', inv.id).update({
-                quantity: newQty,
-                updated_at: knex.fn.now()
-              });
-              await trx('inventory_movements').insert({
-                business_id: businessId,
-                branch_id: invoice.branch_id,
-                product_id: item.product_id,
-                inventory_id: inv.id,
-                user_id: userId,
-                movement_type: 'devolucion',
-                quantity: restoreQty,
-                previous_stock: prevQty,
-                new_stock: newQty,
-                unit_cost: parseFloat(prod.cost_price || 0),
-                total_cost: restoreQty * parseFloat(prod.cost_price || 0),
-                reference_id: invoice.id,
-                reference_type: 'anulacion_factura',
-                notes: `Reversión por anulación de Factura #${invoice.invoice_number}`
-              });
-            }
+      // 2. Revertir saldo en clientes y eliminar cuentas por cobrar vinculadas
+      const arRecords = await trx('accounts_receivable').where({ invoice_id: id });
+      if (invoice.customer_id) {
+        for (const ar of arRecords) {
+          const bal = parseFloat(ar.balance || 0);
+          if (bal > 0) {
+            await trx('customers')
+              .where('id', invoice.customer_id)
+              .decrement('credit_balance', bal);
           }
+        }
+      }
+      await trx('accounts_receivable').where({ invoice_id: id }).del();
 
-          // B. Insumos de Recetas
-          const recipe = await trx('recipes').where('product_id', item.product_id).first();
-          if (recipe) {
-            const recipeItems = await trx('recipe_items').where('recipe_id', recipe.id);
-            for (const ri of recipeItems) {
-              if (ri.supply_id) {
-                const supplyInv = await trx('supplies_inventory')
-                  .where({ supply_id: ri.supply_id, branch_id: invoice.branch_id })
-                  .first();
-                if (supplyInv) {
-                  const qtyToRestore = (parseFloat(ri.quantity) / (parseFloat(recipe.yield_quantity) || 1)) * parseFloat(item.quantity);
-                  const prevSQty = parseFloat(supplyInv.quantity || 0);
-                  const newSQty = prevSQty + qtyToRestore;
-                  await trx('supplies_inventory').where('id', supplyInv.id).update({
-                    quantity: newSQty,
-                    updated_at: knex.fn.now()
-                  });
-                  await trx('supplies_movements').insert({
-                    business_id: businessId,
-                    branch_id: invoice.branch_id,
-                    supply_id: ri.supply_id,
-                    user_id: userId,
-                    movement_type: 'ajuste_positivo',
-                    quantity: qtyToRestore,
-                    previous_stock: prevSQty,
-                    new_stock: newSQty,
-                    reference_type: 'anulacion_factura',
-                    reference_id: invoice.id,
-                    notes: `Restauración de insumo por anulación de Factura #${invoice.invoice_number}`
-                  });
-                }
-              }
-            }
-          }
-
-          // C. Insumos de Sabores / Toppings Modificadores
-          let parsedMods = [];
-          if (item.modifiers_json) {
-            try {
-              parsedMods = typeof item.modifiers_json === 'string' ? JSON.parse(item.modifiers_json) : item.modifiers_json;
-            } catch (e) {}
-          }
-          if (Array.isArray(parsedMods)) {
-            for (const mod of parsedMods) {
-              let supplyId = mod.supply_id ? parseInt(mod.supply_id, 10) : null;
-              let supplyQty = parseFloat(mod.supply_quantity || 0);
-              if (!supplyId && mod.option_id) {
-                const opt = await trx('product_modifier_options').where('id', mod.option_id).first();
-                if (opt && opt.supply_id) {
-                  supplyId = parseInt(opt.supply_id, 10);
-                  if (supplyQty <= 0) supplyQty = parseFloat(opt.supply_quantity || 0);
-                }
-              }
-              if (supplyId && supplyQty > 0) {
-                const totalRestoreSupply = supplyQty * (parseFloat(mod.quantity || 1)) * (parseFloat(item.quantity || 1));
-                const sInv = await trx('supplies_inventory')
-                  .where({ supply_id: supplyId, branch_id: invoice.branch_id })
-                  .first();
-                if (sInv) {
-                  const pQ = parseFloat(sInv.quantity || 0);
-                  const nQ = pQ + totalRestoreSupply;
-                  await trx('supplies_inventory').where('id', sInv.id).update({
-                    quantity: nQ,
-                    updated_at: knex.fn.now()
-                  });
-                  await trx('supplies_movements').insert({
-                    business_id: businessId,
-                    branch_id: invoice.branch_id,
-                    supply_id: supplyId,
-                    user_id: userId,
-                    movement_type: 'ajuste_positivo',
-                    quantity: totalRestoreSupply,
-                    previous_stock: pQ,
-                    new_stock: nQ,
-                    reference_type: 'anulacion_factura',
-                    reference_id: invoice.id,
-                    notes: `Restauración de sabor/modificador (${mod.name || 'Sabor'}) por anulación de Factura #${invoice.invoice_number}`
-                  });
-                }
-              }
-            }
+      // 3. Revertir puntos de fidelización si aplica
+      if (invoice.customer_id && parseFloat(invoice.total || 0) > 0) {
+        const earnedPoints = Math.floor(parseFloat(invoice.total || 0) / 1000);
+        if (earnedPoints > 0) {
+          const cust = await trx('customers').where('id', invoice.customer_id).first();
+          if (cust) {
+            const currentPts = parseInt(cust.loyalty_points || 0, 10);
+            await trx('customers').where('id', invoice.customer_id).update({
+              loyalty_points: Math.max(0, currentPts - earnedPoints)
+            });
           }
         }
       }
 
-      // 5. Marcar orden como cancelada y liberar mesa
+      // 4. Eliminar notas crédito/débito vinculadas (evitar violación de foreign keys)
+      await trx('credit_notes').where({ invoice_id: id }).del();
+      await trx('debit_notes').where({ invoice_id: id }).del();
+
+      // 5. Eliminar asientos contables vinculados
+      const jEntries = await trx('journal_entries').where({ reference_type: 'invoice', reference_id: id }).select('id');
+      for (const je of jEntries) {
+        await trx('journal_entry_lines').where({ journal_entry_id: je.id }).del();
+        await trx('journal_entries').where({ id: je.id }).del();
+      }
+
+      // 6. Restaurar inventario y Kardex si restore_stock está activo
+      if (restore_stock && order) {
+        const orderItems = await trx('order_items').where('order_id', order.id);
+        await restoreStockForInvoice(trx, {
+          businessId,
+          branchId: effectiveBranchId,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoice_number,
+          items: orderItems,
+          userId: effectiveUserId
+        });
+      }
+
+      // 7. Marcar orden como cancelada y liberar mesa
       if (order) {
         await trx('orders').where('id', order.id).update({
           status: 'cancelada',
           notes: reason ? `Factura #${invoice.invoice_number} Anulada: ${reason}` : `Factura #${invoice.invoice_number} Anulada`,
           updated_at: knex.fn.now()
         });
+        await trx('order_items').where('order_id', order.id).update({ status: 'cancelado' }).catch(() => {});
+        await trx('kitchen_tickets').where('order_id', order.id).update({ status: 'cancelado' }).catch(() => {});
+        await trx('delivery_assignments').where('order_id', order.id).update({ status: 'cancelado' }).catch(() => {});
+
         if (order.table_id) {
           await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
         }
       }
 
-      // 6. Eliminar la factura
+      // 8. Eliminar la factura
       await trx('invoices').where('id', id).del();
     });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      req.app.locals.io.to(`branch:${invoice.branch_id}`).emit('order:updated', { order_id: invoice.order_id });
-      req.app.locals.io.to(`branch:${invoice.branch_id}`).emit('table:status-changed', { table_id: order?.table_id, status: 'libre' });
-      req.app.locals.io.to(`branch:${invoice.branch_id}`).emit('invoice:annulled', { invoice_id: id, invoice_number: invoice.invoice_number });
+      if (effectiveBranchId) {
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:updated', { order_id: invoice.order_id });
+        if (order?.table_id) {
+          req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('table:status-changed', { table_id: order.table_id, status: 'libre' });
+        }
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('invoice:annulled', { invoice_id: id, invoice_number: invoice.invoice_number });
+      }
+      req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id: invoice.order_id });
+      req.app.locals.io.to(`business:${businessId}`).emit('invoice:annulled', { invoice_id: id, invoice_number: invoice.invoice_number });
+      req.app.locals.io.emit('order:status-changed', { order_id: invoice.order_id, status: 'cancelada' });
+      req.app.locals.io.emit('invoice:annulled', { invoice_id: id, invoice_number: invoice.invoice_number });
     }
 
     res.json({ message: `Factura #${invoice.invoice_number} anulada exitosamente y orden cancelada` });

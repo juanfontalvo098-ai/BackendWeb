@@ -582,6 +582,196 @@ exports.deductStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6, arg7) 
   }
 };
 
+// Restaurar inventario de insumo al anular factura u orden
+async function restoreSingleSupply(trx, { businessId, branchId, supplyId, quantity, invoiceId, invoiceTag, userId, notes }) {
+  let inv = await trx('supplies_inventory')
+    .where({ branch_id: branchId, supply_id: supplyId })
+    .first();
+
+  if (!inv) {
+    [inv] = await trx('supplies_inventory').insert({
+      business_id: businessId,
+      branch_id: branchId,
+      supply_id: supplyId,
+      quantity: 0
+    }).returning('*');
+  }
+
+  const supply = await trx('supplies').where({ id: supplyId }).first();
+  const restoreQty = parseFloat(quantity);
+  const newBalance = parseFloat(inv.quantity || 0) + restoreQty;
+
+  await trx('supplies_inventory')
+    .where({ id: inv.id })
+    .update({ quantity: newBalance, updated_at: trx.fn.now() });
+
+  await trx('supplies_movements').insert({
+    business_id: businessId,
+    branch_id: branchId,
+    supply_id: supplyId,
+    movement_type: 'ajuste',
+    quantity: restoreQty,
+    unit_cost: supply ? parseFloat(supply.cost_price || 0) : 0,
+    balance_after: newBalance,
+    reference_type: 'anulacion_factura',
+    reference_id: invoiceId || null,
+    notes: notes || `Restauración de insumo por anulación de Factura ${invoiceTag || ''}`,
+    user_id: userId || null
+  });
+}
+
+// Restaurar inventario de producto terminado al anular factura u orden
+async function restoreSingleProduct(trx, { businessId, branchId, productId, quantity, invoiceId, invoiceTag, userId }) {
+  const product = await trx('products').where({ id: productId }).first();
+  if (!product || !product.track_inventory) return;
+
+  let inv = await trx('inventory')
+    .where({ branch_id: branchId, product_id: productId })
+    .first();
+
+  if (!inv) {
+    [inv] = await trx('inventory').insert({
+      business_id: businessId,
+      branch_id: branchId,
+      product_id: productId,
+      quantity: 0
+    }).returning('*');
+  }
+
+  const restoreQty = parseFloat(quantity);
+  const newBalance = parseFloat(inv.quantity || 0) + restoreQty;
+
+  await trx('inventory')
+    .where({ id: inv.id })
+    .update({ quantity: newBalance, updated_at: trx.fn.now() });
+
+  await trx('inventory_movements').insert({
+    business_id: businessId,
+    branch_id: branchId,
+    product_id: productId,
+    movement_type: 'devolucion',
+    quantity: restoreQty,
+    unit_cost: parseFloat(product.cost_price || 0),
+    balance_after: newBalance,
+    reference_type: 'anulacion_factura',
+    reference_id: invoiceId || null,
+    notes: `Reversión por anulación de Factura ${invoiceTag || ''}`,
+    user_id: userId
+  });
+}
+
+// Restaurar inventario al anular factura u orden
+exports.restoreStockForInvoice = async (trx, arg2, arg3, arg4, arg5, arg6, arg7) => {
+  let businessId, branchId, invoiceId, items, userId, invoiceNumber;
+  if (typeof arg2 === 'object' && !Array.isArray(arg2) && arg2 !== null && arg2.businessId) {
+    businessId = arg2.businessId;
+    branchId = arg2.branchId;
+    invoiceId = arg2.invoiceId || arg2.invoice_id;
+    invoiceNumber = arg2.invoiceNumber || arg2.invoice_number;
+    items = arg2.items;
+    userId = arg2.userId || arg2.user_id;
+  } else {
+    businessId = arg2;
+    branchId = arg3;
+    items = arg4;
+    userId = arg5;
+    invoiceId = arg6;
+    invoiceNumber = arg7;
+  }
+
+  if (!items || !Array.isArray(items)) return;
+
+  const invLabel = invoiceNumber || (invoiceId ? `${invoiceId}` : '');
+  const invoiceTag = invLabel ? (invLabel.startsWith('#') ? invLabel : `#${invLabel}`) : 'POS';
+
+  for (const item of items) {
+    const prodId = item.product_id || item.productId || item.id;
+    if (!prodId) continue;
+
+    const itemQty = parseFloat(item.quantity) || 1;
+
+    // 1. Restaurar insumos de receta base (si el producto tiene receta)
+    const recipe = await trx('recipes')
+      .where({ product_id: prodId, business_id: businessId })
+      .first();
+
+    if (recipe) {
+      const recipeItems = await trx('recipe_items').where({ recipe_id: recipe.id });
+      for (const rItem of recipeItems) {
+        if (rItem.supply_id) {
+          const neededSupplyQty = (parseFloat(rItem.quantity) || 0) * itemQty;
+          await restoreSingleSupply(trx, {
+            businessId,
+            branchId,
+            supplyId: rItem.supply_id,
+            quantity: neededSupplyQty,
+            invoiceId,
+            invoiceTag,
+            userId,
+            notes: `Restauración por anulación de Factura ${invoiceTag} (Receta base)`
+          });
+        }
+      }
+    } else {
+      await restoreSingleProduct(trx, {
+        businessId,
+        branchId,
+        productId: prodId,
+        quantity: itemQty,
+        invoiceId,
+        invoiceTag,
+        userId
+      });
+    }
+
+    // 2. Restaurar insumos de modificadores, sabores y toppings seleccionados
+    const rawModifiers = item.modifiers_json || item.modifiers;
+    if (rawModifiers) {
+      let parsedModifiers = [];
+      try {
+        parsedModifiers = typeof rawModifiers === 'string' ? JSON.parse(rawModifiers) : rawModifiers;
+      } catch (e) {
+        parsedModifiers = Array.isArray(rawModifiers) ? rawModifiers : [];
+      }
+
+      if (Array.isArray(parsedModifiers)) {
+        for (const mod of parsedModifiers) {
+          let supplyId = mod.supply_id ? parseInt(mod.supply_id, 10) : null;
+          let supplyQuantity = parseFloat(mod.supply_quantity) || 0;
+
+          if (!supplyId && (mod.option_id || mod.id)) {
+            const optId = mod.option_id || mod.id;
+            const dbOption = await trx('product_modifier_options').where('id', optId).first();
+            if (dbOption && dbOption.supply_id) {
+              supplyId = parseInt(dbOption.supply_id, 10);
+              if (supplyQuantity <= 0 && dbOption.supply_quantity) {
+                supplyQuantity = parseFloat(dbOption.supply_quantity);
+              }
+            }
+          }
+
+          if (supplyId && supplyQuantity > 0) {
+            const modQty = parseFloat(mod.quantity || 1);
+            const neededSupplyQty = supplyQuantity * modQty * itemQty;
+            if (neededSupplyQty > 0) {
+              await restoreSingleSupply(trx, {
+                businessId,
+                branchId,
+                supplyId,
+                quantity: neededSupplyQty,
+                invoiceId,
+                invoiceTag,
+                userId,
+                notes: `Restauración por anulación de Factura ${invoiceTag} (Sabor/Topping: ${mod.name || 'Modificador'} x${modQty})`
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
 // ==================== EXPORTACIÓN DE STOCK (EXCEL) ====================
 
 exports.exportStockExcel = async (req, res) => {

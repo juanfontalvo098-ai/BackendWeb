@@ -3,6 +3,7 @@
  * Órdenes filtradas por branch_id, con toda la lógica de ítems y cocina
  */
 const knex = require('../database/knex');
+const { restoreStockForInvoice } = require('./inventory.controller');
 
 function emitToBranchAndBusiness(io, branchId, businessId, event, data) {
   if (!io) return;
@@ -950,84 +951,115 @@ exports.cancelOrder = async (req, res) => {
       .where({ order_id: id, business_id: businessId })
       .first();
 
+    const effectiveBranchId = order.branch_id || invoice?.branch_id;
+    const effectiveUserId = userId || invoice?.user_id || order.user_id || 1;
+
     await knex.transaction(async (trx) => {
-      // 1. Si tenía factura, revertir movimientos de caja y cuentas por cobrar
+      // 1. Si tenía factura, revertir movimientos de caja, cuentas por cobrar, notas y stock
       if (invoice) {
-        await trx('cash_movements')
-          .where('cash_register_id', invoice.cash_register_id)
-          .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
-          .del();
+        if (invoice.cash_register_id) {
+          await trx('cash_movements')
+            .where('cash_register_id', invoice.cash_register_id)
+            .andWhere('description', 'like', `%Factura ${invoice.invoice_number}%`)
+            .del();
+        } else {
+          await trx('cash_movements')
+            .where('description', 'like', `%Factura ${invoice.invoice_number}%`)
+            .del();
+        }
 
-        await trx('accounts_receivable')
-          .where({ invoice_id: invoice.id })
-          .del();
+        // Revertir saldo en clientes y cuentas por cobrar
+        const arRecords = await trx('accounts_receivable').where({ invoice_id: invoice.id });
+        if (invoice.customer_id) {
+          for (const ar of arRecords) {
+            const bal = parseFloat(ar.balance || 0);
+            if (bal > 0) {
+              await trx('customers')
+                .where('id', invoice.customer_id)
+                .decrement('credit_balance', bal);
+            }
+          }
+        }
+        await trx('accounts_receivable').where({ invoice_id: invoice.id }).del();
 
-        try {
-          await trx('electronic_invoices').where({ invoice_id: invoice.id }).del();
-        } catch (e) {}
+        // Revertir puntos de fidelización si aplica
+        if (invoice.customer_id && parseFloat(invoice.total || 0) > 0) {
+          const earnedPoints = Math.floor(parseFloat(invoice.total || 0) / 1000);
+          if (earnedPoints > 0) {
+            const cust = await trx('customers').where('id', invoice.customer_id).first();
+            if (cust) {
+              const currentPts = parseInt(cust.loyalty_points || 0, 10);
+              await trx('customers').where('id', invoice.customer_id).update({
+                loyalty_points: Math.max(0, currentPts - earnedPoints)
+              });
+            }
+          }
+        }
+
+        // Eliminar notas crédito/débito vinculadas (evitar violación de foreign keys)
+        await trx('credit_notes').where({ invoice_id: invoice.id }).del();
+        await trx('debit_notes').where({ invoice_id: invoice.id }).del();
+
+        // Eliminar asientos contables vinculados
+        const jEntries = await trx('journal_entries').where({ reference_type: 'invoice', reference_id: invoice.id }).select('id');
+        for (const je of jEntries) {
+          await trx('journal_entry_lines').where({ journal_entry_id: je.id }).del();
+          await trx('journal_entries').where({ id: je.id }).del();
+        }
 
         // Restaurar inventario si se solicita
         if (restore_stock) {
           const orderItems = await trx('order_items').where('order_id', order.id);
-          for (const item of orderItems) {
-            const prod = await trx('products').where('id', item.product_id).first();
-            if (prod && prod.track_inventory) {
-              const inv = await trx('inventory')
-                .where({ product_id: item.product_id, branch_id: order.branch_id })
-                .first();
-              if (inv) {
-                const prevQty = parseFloat(inv.quantity || 0);
-                const restoreQty = parseFloat(item.quantity || 1);
-                const newQty = prevQty + restoreQty;
-                await trx('inventory').where('id', inv.id).update({
-                  quantity: newQty,
-                  updated_at: knex.fn.now()
-                });
-                await trx('inventory_movements').insert({
-                  business_id: businessId,
-                  branch_id: order.branch_id,
-                  product_id: item.product_id,
-                  inventory_id: inv.id,
-                  user_id: userId,
-                  movement_type: 'devolucion',
-                  quantity: restoreQty,
-                  previous_stock: prevQty,
-                  new_stock: newQty,
-                  unit_cost: parseFloat(prod.cost_price || 0),
-                  total_cost: restoreQty * parseFloat(prod.cost_price || 0),
-                  reference_id: invoice.id,
-                  reference_type: 'anulacion_factura',
-                  notes: `Reversión por anulación de Orden #${order.id}`
-                });
-              }
-            }
-          }
+          await restoreStockForInvoice(trx, {
+            businessId,
+            branchId: effectiveBranchId,
+            invoiceId: invoice.id,
+            invoiceNumber: invoice.invoice_number,
+            items: orderItems,
+            userId: effectiveUserId
+          });
         }
 
         // Eliminar factura
         await trx('invoices').where('id', invoice.id).del();
       }
 
-      // 2. Actualizar estado de la orden a 'cancelada' (manteniendo los ítems para auditoría)
+      // 2. Actualizar estado de la orden a 'cancelada'
       await trx('orders').where('id', id).update({
         status: 'cancelada',
         notes: reason ? `Cancelada: ${reason}` : (invoice ? `Factura #${invoice.invoice_number} Anulada` : 'Anulada por el usuario'),
         updated_at: knex.fn.now()
       });
 
-      // 3. Liberar la mesa si aplica
+      // 3. Actualizar estado de items y tickets de cocina / domicilios
+      await trx('order_items').where('order_id', id).update({ status: 'cancelado' }).catch(() => {});
+      await trx('kitchen_tickets').where('order_id', id).update({ status: 'cancelado' }).catch(() => {});
+      await trx('delivery_assignments').where('order_id', id).update({ status: 'cancelado' }).catch(() => {});
+
+      // 4. Liberar la mesa si aplica
       if (order.table_id) {
         await trx('tables_restaurant').where('id', order.table_id).update({ status: 'libre' });
       }
     });
 
     if (req.app && req.app.locals && req.app.locals.io) {
-      if (order.table_id) {
-        req.app.locals.io.to(`branch:${order.branch_id}`).emit('table:status-changed', {
+      if (order.table_id && effectiveBranchId) {
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('table:status-changed', {
           table_id: order.table_id, status: 'libre'
         });
       }
-      req.app.locals.io.to(`branch:${order.branch_id}`).emit('order:updated', { order_id: id });
+      if (effectiveBranchId) {
+        req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('order:updated', { order_id: id });
+        if (invoice) {
+          req.app.locals.io.to(`branch:${effectiveBranchId}`).emit('invoice:annulled', { invoice_id: invoice.id, invoice_number: invoice.invoice_number });
+        }
+      }
+      req.app.locals.io.to(`business:${businessId}`).emit('order:updated', { order_id: id });
+      req.app.locals.io.emit('order:status-changed', { order_id: id, status: 'cancelada' });
+      if (invoice) {
+        req.app.locals.io.to(`business:${businessId}`).emit('invoice:annulled', { invoice_id: invoice.id, invoice_number: invoice.invoice_number });
+        req.app.locals.io.emit('invoice:annulled', { invoice_id: invoice.id, invoice_number: invoice.invoice_number });
+      }
     }
 
     res.json({ message: invoice ? `Factura #${invoice.invoice_number} y orden anuladas exitosamente` : 'Orden cancelada exitosamente' });

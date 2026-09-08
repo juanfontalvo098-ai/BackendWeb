@@ -10,6 +10,8 @@ router.use(tenantMiddleware);
 
 router.get('/', ordersController.getAll);
 router.get('/kitchen-queue', ordersController.getKitchenQueue);
+router.get('/kitchen-tickets', ordersController.getKitchenActiveTickets);
+router.put('/kitchen-tickets/:ticketId/status', rbac('cocinero', 'admin', 'gerente', 'cajero', 'mesero'), ordersController.updateKitchenTicketStatus);
 router.get('/:id', ordersController.getById);
 
 router.post('/', rbac('mesero', 'cajero', 'admin', 'gerente'), ordersController.create);

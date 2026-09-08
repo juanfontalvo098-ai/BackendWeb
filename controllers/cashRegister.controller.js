@@ -130,15 +130,20 @@ exports.getShiftSummary = async (req, res) => {
     if (!register) return res.status(404).json({ error: 'No hay caja abierta' });
 
     const invoices = await knex('invoices')
-      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'total', 'cash_amount', 'transfer_amount', 'card_amount', 'third_party_total')
+      .select('payment_method', 'subtotal', 'tax_total', 'tip_amount', 'delivery_fee', 'total', 'cash_amount', 'transfer_amount', 'card_amount', 'third_party_total')
       .where('cash_register_id', register.id);
 
-    let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0, totalTips = 0;
-    let thirdPartyRevenue = 0;
+    let grossRevenue = 0, netRevenue = 0, taxTotal = 0, totalTips = 0, totalDeliveryFees = 0;
+    let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0;
+    let invoiceThirdPartyTotal = 0;
 
     invoices.forEach(inv => {
+      grossRevenue += parseFloat(inv.total || 0);
+      netRevenue += parseFloat(inv.subtotal || 0);
+      taxTotal += parseFloat(inv.tax_total || 0);
       totalTips += parseFloat(inv.tip_amount || 0);
-      thirdPartyRevenue += parseFloat(inv.third_party_total || 0);
+      totalDeliveryFees += parseFloat(inv.delivery_fee || 0);
+      invoiceThirdPartyTotal += parseFloat(inv.third_party_total || 0);
       const total = parseFloat(inv.total || 0);
       const cAmt = parseFloat(inv.cash_amount || 0);
       const tAmt = parseFloat(inv.transfer_amount || 0);
@@ -156,6 +161,26 @@ exports.getShiftSummary = async (req, res) => {
       else if (inv.payment_method === 'credito') creditSales += total;
       else cashSales += total;
     });
+
+    // Verificación exhaustiva de ítems de terceros en base de datos
+    const thirdPartyRow = await knex('order_items as oi')
+      .join('invoices as i', 'oi.order_id', 'i.order_id')
+      .join('products as p', 'oi.product_id', 'p.id')
+      .where('i.cash_register_id', register.id)
+      .andWhere(function() {
+        this.where('oi.is_third_party', true).orWhere('p.is_third_party', true);
+      })
+      .select(knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as third_party_total'))
+      .first();
+
+    const thirdPartyRevenue = Math.max(
+      parseFloat(thirdPartyRow?.third_party_total || 0),
+      invoiceThirdPartyTotal
+    );
+
+    const ownNetRevenue = Math.max(0, netRevenue - thirdPartyRevenue);
+    const ownOperatingRevenue = ownNetRevenue + totalDeliveryFees + taxTotal;
+    const ownGrossRevenue = Math.max(0, grossRevenue - thirdPartyRevenue);
 
     const movements = await knex('cash_movements')
       .select('type', 'amount', 'payment_method')
@@ -196,7 +221,15 @@ exports.getShiftSummary = async (req, res) => {
       opening_amount: initialFloat,
       cashSales, cashInflows, cashOutflows, cashRefunds, expectedCash,
       cardSales, transferSales, creditSales, totalTips,
+      grossRevenue,
+      netRevenue,
+      totalDeliveryFees,
+      delivery_fee: totalDeliveryFees,
       thirdPartyRevenue,
+      third_party_revenue: thirdPartyRevenue,
+      ownNetRevenue,
+      ownOperatingRevenue,
+      ownGrossRevenue,
       audit: {
         canceledOrdersCount: parseInt(auditRow?.canceled_orders_count || 0),
         canceledAmount: parseFloat(auditRow?.canceled_amount || 0)
@@ -225,16 +258,17 @@ exports.close = async (req, res) => {
       .select('i.*', 'o.table_id', 't.table_number', 'u.full_name as waiter_name')
       .where('i.cash_register_id', register.id);
 
-    let grossRevenue = 0, netRevenue = 0, taxTotal = 0, totalTips = 0;
+    let grossRevenue = 0, netRevenue = 0, taxTotal = 0, totalTips = 0, totalDeliveryFees = 0;
     let cashSales = 0, cardSales = 0, transferSales = 0, creditSales = 0;
-    let thirdPartyRevenue = 0;
+    let invoiceThirdPartyTotal = 0;
 
     invoices.forEach(inv => {
       grossRevenue += parseFloat(inv.total || 0);
       netRevenue += parseFloat(inv.subtotal || 0);
       taxTotal += parseFloat(inv.tax_total || 0);
       totalTips += parseFloat(inv.tip_amount || 0);
-      thirdPartyRevenue += parseFloat(inv.third_party_total || 0);
+      totalDeliveryFees += parseFloat(inv.delivery_fee || 0);
+      invoiceThirdPartyTotal += parseFloat(inv.third_party_total || 0);
       const total = parseFloat(inv.total || 0);
       const cAmt = parseFloat(inv.cash_amount || 0);
       const tAmt = parseFloat(inv.transfer_amount || 0);
@@ -252,6 +286,26 @@ exports.close = async (req, res) => {
       else if (inv.payment_method === 'credito') creditSales += total;
       else cashSales += total;
     });
+
+    // Verificación exhaustiva de ítems de terceros en base de datos
+    const thirdPartyRow = await knex('order_items as oi')
+      .join('invoices as i', 'oi.order_id', 'i.order_id')
+      .join('products as p', 'oi.product_id', 'p.id')
+      .where('i.cash_register_id', register.id)
+      .andWhere(function() {
+        this.where('oi.is_third_party', true).orWhere('p.is_third_party', true);
+      })
+      .select(knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as third_party_total'))
+      .first();
+
+    const thirdPartyRevenue = Math.max(
+      parseFloat(thirdPartyRow?.third_party_total || 0),
+      invoiceThirdPartyTotal
+    );
+
+    const ownNetRevenue = Math.max(0, netRevenue - thirdPartyRevenue);
+    const ownOperatingRevenue = ownNetRevenue + totalDeliveryFees + taxTotal;
+    const ownGrossRevenue = Math.max(0, grossRevenue - thirdPartyRevenue);
 
     const movements = await knex('cash_movements')
       .select('type', 'amount', 'payment_method', 'description', 'created_at')
@@ -301,10 +355,12 @@ exports.close = async (req, res) => {
       .join('categories as c', 'p.category_id', 'c.id')
       .join('invoices as i', 'oi.order_id', 'i.order_id')
       .where('i.cash_register_id', register.id)
-      .groupBy('p.id', 'p.name', 'c.name')
+      .groupBy('p.id', 'p.name', 'c.name', 'p.is_third_party', 'oi.is_third_party')
       .select(
+        'p.id as product_id',
         'p.name as product_name',
         'c.name as category_name',
+        knex.raw('COALESCE(bool_or(oi.is_third_party), bool_or(p.is_third_party), false) as is_third_party'),
         knex.raw('SUM(oi.quantity) as quantity'),
         knex.raw('SUM(oi.quantity * oi.unit_price) as total_sales'),
         knex.raw('AVG(oi.unit_price) as unit_price')
@@ -336,8 +392,14 @@ exports.close = async (req, res) => {
       grossRevenue,
       netRevenue,
       taxTotal,
+      totalDeliveryFees,
+      delivery_fee: totalDeliveryFees,
       totalVoids,
       thirdPartyRevenue,
+      third_party_revenue: thirdPartyRevenue,
+      ownNetRevenue,
+      ownOperatingRevenue,
+      ownGrossRevenue,
       audit: {
         canceledOrdersCount: parseInt(voidRow?.canceled_orders_count || 0),
         canceledAmount: totalVoids

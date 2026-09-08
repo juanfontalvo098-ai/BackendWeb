@@ -213,9 +213,20 @@ exports.create = async (req, res) => {
 
     const effectiveBranchId = branchId || order.branch_id || register.branch_id;
 
-    const items = await knex('order_items')
-      .select('order_id', 'product_id', 'quantity', 'unit_price', 'tax_rate', 'tax_included', 'is_third_party', 'modifiers_json')
-      .where('order_id', order_id);
+    const items = await knex('order_items as oi')
+      .leftJoin('products as p', 'oi.product_id', 'p.id')
+      .select(
+        'oi.order_id', 
+        'oi.product_id', 
+        'oi.quantity', 
+        'oi.unit_price', 
+        'oi.tax_rate', 
+        'oi.tax_included', 
+        'oi.is_third_party', 
+        'p.is_third_party as product_is_third_party',
+        'oi.modifiers_json'
+      )
+      .where('oi.order_id', order_id);
     if (items.length === 0) return res.status(400).json({ error: 'La orden no tiene ítems' });
 
     let subtotal = 0, tax_total = 0;
@@ -226,8 +237,9 @@ exports.create = async (req, res) => {
       const qty = parseFloat(item.quantity) || 1;
       const lineTotal = qty * parseFloat(item.unit_price || 0);
 
-      // Acumular total de terceros (línea completa incluyendo impuestos)
-      if (item.is_third_party) {
+      // Acumular total de terceros (revisando bandera de ítem o de producto en catálogo)
+      const isThirdParty = Boolean(item.is_third_party || item.product_is_third_party);
+      if (isThirdParty) {
         thirdPartyTotal += lineTotal;
       }
 

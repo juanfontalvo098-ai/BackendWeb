@@ -152,6 +152,73 @@ exports.getShiftById = async (req, res) => {
     }
     delete shift.snapshot_json;
 
+    // Verificar y enriquecer datos de terceros y domicilios
+    const cashRegisterId = shift.cash_register_id || shift.id;
+    let verifiedThirdParty = parseFloat(shift.third_party_revenue || 0);
+    let verifiedDeliveryFees = parseFloat(shift.snapshot?.totalDeliveryFees || shift.snapshot?.delivery_fee || 0);
+
+    try {
+      const thirdPartyRow = await knex('order_items as oi')
+        .join('invoices as i', 'oi.order_id', 'i.order_id')
+        .join('products as p', 'oi.product_id', 'p.id')
+        .where('i.cash_register_id', cashRegisterId)
+        .andWhere(function() {
+          this.where('oi.is_third_party', true).orWhere('p.is_third_party', true);
+        })
+        .select(knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as third_party_total'))
+        .first();
+
+      if (thirdPartyRow && parseFloat(thirdPartyRow.third_party_total || 0) > 0) {
+        verifiedThirdParty = Math.max(verifiedThirdParty, parseFloat(thirdPartyRow.third_party_total));
+      }
+
+      const deliveryRow = await knex('invoices')
+        .where('cash_register_id', cashRegisterId)
+        .select(knex.raw('COALESCE(SUM(delivery_fee), 0) as total_delivery'))
+        .first();
+
+      if (deliveryRow && parseFloat(deliveryRow.total_delivery || 0) > 0) {
+        verifiedDeliveryFees = Math.max(verifiedDeliveryFees, parseFloat(deliveryRow.total_delivery));
+      }
+    } catch (e) {}
+
+    // Fallback: auditar ítems del snapshot itemizedSales
+    if (Array.isArray(shift.snapshot?.itemizedSales)) {
+      let snapThird = 0;
+      shift.snapshot.itemizedSales.forEach(it => {
+        if (it.is_third_party || String(it.product_name || '').toUpperCase().includes('HOUSE')) {
+          snapThird += parseFloat(it.total_sales || 0);
+        }
+      });
+      if (snapThird > 0) {
+        verifiedThirdParty = Math.max(verifiedThirdParty, snapThird);
+      }
+    }
+
+    const grossRevenue = parseFloat(shift.gross_revenue || 0);
+    const netRevenue = parseFloat(shift.net_revenue || 0);
+    const totalTips = parseFloat(shift.total_tips || 0);
+    const ownNetRevenue = Math.max(0, netRevenue - verifiedThirdParty);
+    const ownOperatingRevenue = ownNetRevenue + verifiedDeliveryFees + parseFloat(shift.tax_total || 0);
+    const ownGrossRevenue = Math.max(0, grossRevenue - verifiedThirdParty);
+
+    shift.third_party_revenue = verifiedThirdParty;
+    shift.total_delivery_fees = verifiedDeliveryFees;
+    shift.delivery_fee = verifiedDeliveryFees;
+    shift.own_net_revenue = ownNetRevenue;
+    shift.own_operating_revenue = ownOperatingRevenue;
+    shift.own_gross_revenue = ownGrossRevenue;
+
+    if (shift.snapshot) {
+      shift.snapshot.thirdPartyRevenue = verifiedThirdParty;
+      shift.snapshot.third_party_revenue = verifiedThirdParty;
+      shift.snapshot.totalDeliveryFees = verifiedDeliveryFees;
+      shift.snapshot.delivery_fee = verifiedDeliveryFees;
+      shift.snapshot.ownNetRevenue = ownNetRevenue;
+      shift.snapshot.ownOperatingRevenue = ownOperatingRevenue;
+      shift.snapshot.ownGrossRevenue = ownGrossRevenue;
+    }
+
     res.json(shift);
   } catch (err) {
     console.error('Error al obtener detalle de turno:', err);
@@ -263,51 +330,112 @@ exports.exportShiftExcel = async (req, res) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0D9488' } };
     });
 
+    // Verificar y enriquecer datos de terceros y domicilios para el excel
+    const cashRegisterId = shift.cash_register_id || shift.id;
+    let verifiedThirdParty = parseFloat(shift.third_party_revenue || 0);
+    let verifiedDeliveryFees = parseFloat(snapshot.totalDeliveryFees || snapshot.delivery_fee || 0);
+
+    try {
+      const thirdPartyRow = await knex('order_items as oi')
+        .join('invoices as i', 'oi.order_id', 'i.order_id')
+        .join('products as p', 'oi.product_id', 'p.id')
+        .where('i.cash_register_id', cashRegisterId)
+        .andWhere(function() {
+          this.where('oi.is_third_party', true).orWhere('p.is_third_party', true);
+        })
+        .select(knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as third_party_total'))
+        .first();
+
+      if (thirdPartyRow && parseFloat(thirdPartyRow.third_party_total || 0) > 0) {
+        verifiedThirdParty = Math.max(verifiedThirdParty, parseFloat(thirdPartyRow.third_party_total));
+      }
+
+      const deliveryRow = await knex('invoices')
+        .where('cash_register_id', cashRegisterId)
+        .select(knex.raw('COALESCE(SUM(delivery_fee), 0) as total_delivery'))
+        .first();
+
+      if (deliveryRow && parseFloat(deliveryRow.total_delivery || 0) > 0) {
+        verifiedDeliveryFees = Math.max(verifiedDeliveryFees, parseFloat(deliveryRow.total_delivery));
+      }
+    } catch (e) {}
+
+    if (Array.isArray(snapshot.itemizedSales)) {
+      let snapThird = 0;
+      snapshot.itemizedSales.forEach(it => {
+        if (it.is_third_party || String(it.product_name || '').toUpperCase().includes('HOUSE')) {
+          snapThird += parseFloat(it.total_sales || 0);
+        }
+      });
+      if (snapThird > 0) {
+        verifiedThirdParty = Math.max(verifiedThirdParty, snapThird);
+      }
+    }
+
+    const thirdPartyRev = verifiedThirdParty;
+    const deliveryFee = verifiedDeliveryFees;
     const gr = parseFloat(shift.gross_revenue || 0);
-    const cs = parseFloat(shift.cash_sales || 0);
-    const cas = parseFloat(shift.card_sales || 0);
-    const ts = parseFloat(shift.transfer_sales || 0);
-
-    const rEfe = sheet1.addRow(['Efectivo (Ventas)', cs, `${gr > 0 ? ((cs / gr) * 100).toFixed(1) : 0}%`, '---']);
-    const rTar = sheet1.addRow(['Tarjeta Crédito/Débito', cas, `${gr > 0 ? ((cas / gr) * 100).toFixed(1) : 0}%`, '---']);
-    const rTra = sheet1.addRow(['Transferencia / Nequi', ts, `${gr > 0 ? ((ts / gr) * 100).toFixed(1) : 0}%`, '---']);
-    [rEfe, rTar, rTra].forEach(r => { r.getCell(2).numFmt = '"$"#,##0'; });
-
-    const rowTotPay = sheet1.addRow(['TOTAL VENTAS BRUTAS', gr, '100.0%', shift.total_tickets || (snapshot.invoices || []).length]);
-    rowTotPay.font = { bold: true };
-    rowTotPay.getCell(2).numFmt = '"$"#,##0';
-
-    sheet1.addRow([]);
-
-    // 3. Rentabilidad, Insumos e Impuestos
-    const rowTitle3 = sheet1.addRow(['3. COSTEO, IMPUESTOS Y UTILIDAD OPERATIVA DEL TURNO']);
-    rowTitle3.getCell(1).font = { bold: true, size: 12, color: { argb: 'FF0F172A' } };
-
-    const thirdPartyRev = parseFloat(shift.third_party_revenue || 0);
     const netRev = parseFloat(shift.net_revenue || 0);
     const ownNetRev = Math.max(0, netRev - thirdPartyRev);
+    const ownOperatingRev = ownNetRev + deliveryFee + parseFloat(shift.tax_total || 0);
+    const ownGrossRev = Math.max(0, gr - thirdPartyRev);
+    const totalTips = parseFloat(shift.total_tips || 0);
     const suppCost = suppliesData.totalSuppliesCost || 0;
     const grossProfit = Math.max(0, ownNetRev - suppCost);
     const profitMargin = ownNetRev > 0 ? ((grossProfit / ownNetRev) * 100).toFixed(1) : 0;
 
-    const rNet = sheet1.addRow(['Ventas Netas (Sin Impuestos):', netRev, 'Impuestos Recaudados:', parseFloat(shift.tax_total || 0)]);
-    const rSupp = sheet1.addRow(['Costo Insumos Consumidos (Recetas):', suppCost, 'Propinas Recaudadas:', parseFloat(shift.total_tips || 0)]);
-    const rProf = sheet1.addRow(['Ganancia Bruta Operativa Estimada:', grossProfit, 'Margen Bruto Operativo:', `${profitMargin}%`]);
-    const rWith = sheet1.addRow(['Egresos y Retiros de Caja:', parseFloat(shift.total_withdrawals || 0), 'Valor en Anulaciones:', parseFloat(shift.total_voids || 0)]);
+    const cs = parseFloat(shift.cash_sales || 0);
+    const cas = parseFloat(shift.card_sales || 0);
+    const ts = parseFloat(shift.transfer_sales || 0);
 
-    // Fila de ventas de terceros (si hay)
-    if (thirdPartyRev > 0) {
-      const rThird = sheet1.addRow(['Ventas de Terceros/Socios (No Contabilizadas):', thirdPartyRev, 'Ventas Propias Netas:', ownNetRev]);
-      rThird.getCell(2).numFmt = '"$"#,##0';
-      rThird.getCell(4).numFmt = '"$"#,##0';
-      rThird.font = { bold: true, color: { argb: 'FFD97706' } };
-      rThird.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
-      rThird.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
-      rThird.getCell(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
-      rThird.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
-    }
+    const rEfe = sheet1.addRow(['Efectivo en Caja (Ventas)', cs, `${gr > 0 ? ((cs / gr) * 100).toFixed(1) : 0}%`, '---']);
+    const rTar = sheet1.addRow(['Tarjeta Crédito/Débito', cas, `${gr > 0 ? ((cas / gr) * 100).toFixed(1) : 0}%`, '---']);
+    const rTra = sheet1.addRow(['Transferencia / Nequi / Bancos', ts, `${gr > 0 ? ((ts / gr) * 100).toFixed(1) : 0}%`, '---']);
+    [rEfe, rTar, rTra].forEach(r => { r.getCell(2).numFmt = '"$"#,##0'; });
 
-    [rNet, rSupp, rProf, rWith].forEach(r => {
+    const rowTotPay = sheet1.addRow(['TOTAL RECAUDADO EN MEDIOS DE PAGO (BRUTO)', gr, '100.0%', shift.total_tickets || (snapshot.invoices || []).length]);
+    rowTotPay.font = { bold: true };
+    rowTotPay.getCell(2).numFmt = '"$"#,##0';
+    rowTotPay.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+    rowTotPay.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+
+    sheet1.addRow([]);
+
+    // 3. Discriminación Comercial de Ventas y Fletes
+    const rowTitle3 = sheet1.addRow(['3. DISCRIMINACIÓN COMERCIAL DE VENTAS, TERCEROS Y PROPINAS']);
+    rowTitle3.getCell(1).font = { bold: true, size: 12, color: { argb: 'FF0F172A' } };
+
+    const tblDiscHeader = sheet1.addRow(['Concepto de Venta / Ingreso', 'Monto', 'Concepto / Destino', 'Subtotal']);
+    tblDiscHeader.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } };
+    });
+
+    const rV1 = sheet1.addRow(['Ventas Netas de Productos Propios (Negocio):', ownNetRev, 'Ventas de Terceros / Socios (Consignación):', thirdPartyRev]);
+    const rV2 = sheet1.addRow(['Subtotal Neto de Productos (Propios + Terceros):', netRev, 'Servicios de Entrega / Domicilios:', deliveryFee]);
+    const rV3 = sheet1.addRow(['Facturado Propio Operativo (Sin Propina):', ownOperatingRev, 'Propinas Recaudadas (del Personal):', totalTips]);
+    const rV4 = sheet1.addRow(['Total Propio Recaudado (Con Propinas):', ownGrossRev, 'TOTAL RECAUDADO / FACTURADO BRUTO:', gr]);
+
+    [rV1, rV2, rV3, rV4].forEach(r => {
+      r.getCell(2).numFmt = '"$"#,##0';
+      r.getCell(4).numFmt = '"$"#,##0';
+      r.font = { bold: true };
+    });
+    rV4.getCell(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+    rV4.getCell(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDCFCE7' } };
+    rV4.getCell(4).font = { bold: true, color: { argb: 'FF16A34A' } };
+
+    sheet1.addRow([]);
+
+    // 4. Rentabilidad, Insumos e Impuestos
+    const rowTitle4 = sheet1.addRow(['4. COSTEO, IMPUESTOS Y UTILIDAD OPERATIVA DEL TURNO']);
+    rowTitle4.getCell(1).font = { bold: true, size: 12, color: { argb: 'FF0F172A' } };
+
+    const rSupp = sheet1.addRow(['Costo Insumos Consumidos (Recetas):', suppCost, 'Impuestos Recaudados (IVA/Impoconsumo):', parseFloat(shift.tax_total || 0)]);
+    const rProf = sheet1.addRow(['Ganancia Bruta Operativa Estimada (s/ Propios):', grossProfit, 'Margen Bruto Operativo:', `${profitMargin}%`]);
+    const rWith = sheet1.addRow(['Egresos y Retiros de Caja:', parseFloat(shift.total_withdrawals || 0), 'Valor en Anulaciones / Cancelaciones:', parseFloat(shift.total_voids || 0)]);
+
+    [rSupp, rProf, rWith].forEach(r => {
       r.getCell(2).numFmt = '"$"#,##0';
       r.getCell(4).numFmt = '"$"#,##0';
       r.font = { bold: true };
@@ -358,6 +486,7 @@ exports.exportShiftExcel = async (req, res) => {
     // ==================== SHEET 3: Ventas por Producto ====================
     const sheet3 = workbook.addWorksheet('Ventas por Producto');
     sheet3.columns = [
+      { header: 'Origen', key: 'origin', width: 18 },
       { header: 'Categoría', key: 'category_name', width: 22 },
       { header: 'Nombre del Producto', key: 'product_name', width: 32 },
       { header: 'Unidades Vendidas', key: 'quantity', width: 18 },
@@ -373,7 +502,9 @@ exports.exportShiftExcel = async (req, res) => {
 
     (snapshot.itemizedSales || []).forEach(item => {
       const totSale = parseFloat(item.total_sales || 0);
+      const isThird = Boolean(item.is_third_party || String(item.product_name || '').toUpperCase().includes('HOUSE'));
       const row = sheet3.addRow({
+        origin: isThird ? 'TERCERO / SOCIO' : 'PROPIO',
         category_name: item.category_name || 'General',
         product_name: item.product_name,
         quantity: parseInt(item.quantity || 0, 10),
@@ -381,20 +512,24 @@ exports.exportShiftExcel = async (req, res) => {
         total_sales: totSale,
         share: `${gr > 0 ? ((totSale / gr) * 100).toFixed(1) : 0}%`
       });
-      row.getCell(4).numFmt = '"$"#,##0';
+      if (isThird) {
+        row.getCell(1).font = { bold: true, color: { argb: 'FFD97706' } };
+      }
       row.getCell(5).numFmt = '"$"#,##0';
+      row.getCell(6).numFmt = '"$"#,##0';
     });
 
     // ==================== SHEET 4: Historial de Transacciones (Facturas) ====================
     const sheet2 = workbook.addWorksheet('Historial de Facturas');
     sheet2.columns = [
-      { header: 'N° Factura', key: 'invoice_number', width: 24 },
+      { header: 'N° Factura', key: 'invoice_number', width: 22 },
       { header: 'Fecha y Hora', key: 'created_at', width: 22 },
       { header: 'Mesa / Canal', key: 'table_number', width: 16 },
-      { header: 'Mesero / Atendido por', key: 'waiter_name', width: 24 },
+      { header: 'Mesero / Atendido por', key: 'waiter_name', width: 22 },
       { header: 'Método de Pago', key: 'payment_method', width: 18 },
-      { header: 'Subtotal', key: 'subtotal', width: 16 },
-      { header: 'Impuestos', key: 'tax_total', width: 16 },
+      { header: 'Subtotal Net', key: 'subtotal', width: 16 },
+      { header: 'Domicilio', key: 'delivery_fee', width: 16 },
+      { header: 'Terceros', key: 'third_party_total', width: 16 },
       { header: 'Propina', key: 'tip_amount', width: 16 },
       { header: 'Total Facturado', key: 'total', width: 18 }
     ];
@@ -412,11 +547,12 @@ exports.exportShiftExcel = async (req, res) => {
         waiter_name: inv.waiter_name || 'Mesero',
         payment_method: (inv.payment_method || 'efectivo').toUpperCase(),
         subtotal: parseFloat(inv.subtotal || 0),
-        tax_total: parseFloat(inv.tax_total || 0),
+        delivery_fee: parseFloat(inv.delivery_fee || 0),
+        third_party_total: parseFloat(inv.third_party_total || 0),
         tip_amount: parseFloat(inv.tip_amount || 0),
         total: parseFloat(inv.total || 0)
       });
-      [6, 7, 8, 9].forEach(i => { row.getCell(i).numFmt = '"$"#,##0'; });
+      [6, 7, 8, 9, 10].forEach(i => { row.getCell(i).numFmt = '"$"#,##0'; });
     });
 
     // ==================== SHEET 5: Movimientos de Caja y Gastos ====================

@@ -440,6 +440,7 @@ exports.create = async (req, res) => {
             business_id: businessId,
             branch_id: branchId,
             table_number: resolvedTableDisplay,
+            table_id: table_id || finalOrder.table_id,
             items: itemsForKitchen,
             notes: notes || finalOrder.notes || '',
             waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
@@ -543,8 +544,10 @@ exports.updateOrder = async (req, res) => {
   const { businessId } = req.tenant;
 
   try {
-    const order = await knex('orders')
-      .where({ id, business_id: businessId })
+    const order = await knex('orders as o')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+      .where({ 'o.id': id, 'o.business_id': businessId })
+      .select('o.*', 't.table_number as db_table_number')
       .first();
 
     if (!order) return res.status(404).json({ error: 'Orden no encontrada' });
@@ -553,6 +556,8 @@ exports.updateOrder = async (req, res) => {
 
     let createdTicket = null;
     let kitchenItemsToSend = [];
+    const effectiveTableId = table_id !== undefined ? (table_id ? parseInt(table_id, 10) : null) : order.table_id;
+    let resolvedTableDisplay = '';
 
     await knex.transaction(async (trx) => {
       const updateData = { updated_at: trx.fn.now() };
@@ -648,12 +653,31 @@ exports.updateOrder = async (req, res) => {
               };
             });
 
-            const tableDisplay = order.table_number ? (order.table_number.toString().toLowerCase().startsWith('mesa') ? order.table_number : `Mesa ${order.table_number}`) : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+            let resolvedTableNumber = req.body.table_number || order.db_table_number;
+            if (effectiveTableId && (!resolvedTableNumber || table_id !== undefined)) {
+              const tableRec = await trx('tables_restaurant')
+                .where({ id: effectiveTableId, business_id: businessId })
+                .first();
+              if (tableRec && tableRec.table_number) {
+                resolvedTableNumber = tableRec.table_number;
+              }
+            }
+
+            if (resolvedTableNumber) {
+              const cleanNum = resolvedTableNumber.toString().replace(/^mesa\s*/i, '').trim();
+              resolvedTableDisplay = `Mesa ${cleanNum}`;
+            } else if (effectiveTableId) {
+              resolvedTableDisplay = `Mesa ${effectiveTableId}`;
+            } else {
+              const effType = order_type || order.order_type;
+              resolvedTableDisplay = effType === 'delivery' ? 'DOMICILIO' : 'PARA LLEVAR';
+            }
+
             const [insertedTicket] = await trx('kitchen_tickets').insert({
               business_id: businessId,
               branch_id: order.branch_id,
               order_id: id,
-              table_number: tableDisplay,
+              table_number: resolvedTableDisplay,
               status: 'pendiente',
               items_json: JSON.stringify(kitchenItemsToSend)
             }).returning('*');
@@ -689,17 +713,18 @@ exports.updateOrder = async (req, res) => {
       }
 
       if (send_to_kitchen && kitchenItemsToSend.length > 0) {
-        const tableDisplay = order.table_number ? (order.table_number.toString().toLowerCase().startsWith('mesa') ? order.table_number : `Mesa ${order.table_number}`) : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+        const ticketTableDisplay = createdTicket?.table_number || resolvedTableDisplay || (effectiveTableId ? `Mesa ${effectiveTableId}` : 'PARA LLEVAR');
         const ticketPayload = {
           id: createdTicket ? createdTicket.id : undefined,
           order_id: id,
           business_id: businessId,
           branch_id: order.branch_id,
-          table_number: tableDisplay,
+          table_number: ticketTableDisplay,
+          table_id: effectiveTableId,
           items: kitchenItemsToSend,
           notes: notes || order.notes || '',
           waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
-          order_type: order.order_type,
+          order_type: effectiveTableId ? 'mesa' : (order_type || order.order_type),
           created_at: createdTicket ? createdTicket.created_at : new Date().toISOString()
         };
         emitToBranchAndBusiness(io, order.branch_id, businessId, 'kitchen:new-ticket', ticketPayload);
@@ -916,7 +941,15 @@ exports.sendToKitchen = async (req, res) => {
         modifiers_json: i.modifiers_json
       };
     });
-    const tableDisplay = order.table_number ? (order.table_number.toString().toLowerCase().startsWith('mesa') ? order.table_number : `Mesa ${order.table_number}`) : (order.order_type === 'delivery' ? 'PARA LLEVAR (DOMICILIO)' : 'PARA LLEVAR');
+    let tableDisplay = '';
+    if (order.table_number) {
+      const cleanNum = order.table_number.toString().replace(/^mesa\s*/i, '').trim();
+      tableDisplay = `Mesa ${cleanNum}`;
+    } else if (order.table_id) {
+      tableDisplay = `Mesa ${order.table_id}`;
+    } else {
+      tableDisplay = order.order_type === 'delivery' ? 'DOMICILIO' : 'PARA LLEVAR';
+    }
 
     let newTicket = null;
     await knex.transaction(async (trx) => {
@@ -948,10 +981,11 @@ exports.sendToKitchen = async (req, res) => {
         business_id: businessId,
         branch_id: order.branch_id,
         table_number: tableDisplay,
+        table_id: order.table_id,
         items: itemsJson,
         notes: order.notes || '',
         waiter_name: (req.user && (req.user.full_name || req.user.name || req.user.username)) || 'Personal',
-        order_type: order.order_type,
+        order_type: order.table_id ? 'mesa' : order.order_type,
         created_at: newTicket?.created_at || new Date().toISOString()
       };
       emitToBranchAndBusiness(io, order.branch_id, businessId, 'kitchen:new-ticket', ticketPayload);
@@ -1197,11 +1231,14 @@ exports.getKitchenQueue = async (req, res) => {
     const { businessId, branchId, isGlobalScope } = req.tenant;
     let query = knex('kitchen_tickets as kt')
       .leftJoin('orders as o', 'kt.order_id', 'o.id')
+      .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
       .leftJoin('users as u', 'o.user_id', 'u.id')
       .leftJoin('customers as c', 'o.customer_id', 'c.id')
       .select(
         'kt.*',
         'o.order_type',
+        'o.table_id',
+        't.table_number as order_table_number',
         'o.delivery_address',
         'o.delivery_phone',
         'o.notes as order_notes',
@@ -1218,7 +1255,33 @@ exports.getKitchenQueue = async (req, res) => {
     }
 
     const tickets = await query;
-    res.json(tickets || []);
+    const normalizedTickets = (tickets || []).map(t => {
+      let items = [];
+      if (Array.isArray(t.items_json)) {
+        items = t.items_json;
+      } else if (typeof t.items_json === 'string') {
+        try {
+          items = JSON.parse(t.items_json);
+        } catch (e) {
+          items = [];
+        }
+      }
+
+      let finalTableNumber = t.table_number;
+      if (t.order_table_number || t.table_id) {
+        const rawNum = t.order_table_number || t.table_id;
+        const clean = String(rawNum).replace(/^mesa\s*/i, '').trim();
+        finalTableNumber = `Mesa ${clean}`;
+      }
+
+      return {
+        ...t,
+        table_number: finalTableNumber,
+        items
+      };
+    });
+
+    res.json(normalizedTickets);
   } catch (err) {
     console.error('Error al consultar cola de cocina:', err);
     res.status(500).json({ error: 'Error al consultar cola de cocina', details: err.message });
@@ -1291,6 +1354,7 @@ exports.getKitchenActiveTickets = async (req, res) => {
       .select(
         'kt.*',
         'o.order_type',
+        'o.table_id',
         'o.delivery_address',
         'o.delivery_phone',
         'o.notes as order_notes',
@@ -1325,8 +1389,17 @@ exports.getKitchenActiveTickets = async (req, res) => {
           items = t.items_json;
         }
       }
+
+      let finalTableNumber = t.table_number;
+      if (t.order_table_number || t.table_id) {
+        const rawNum = t.order_table_number || t.table_id;
+        const clean = String(rawNum).replace(/^mesa\s*/i, '').trim();
+        finalTableNumber = `Mesa ${clean}`;
+      }
+
       return {
         ...t,
+        table_number: finalTableNumber,
         items
       };
     });

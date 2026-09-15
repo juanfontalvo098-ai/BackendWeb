@@ -100,10 +100,43 @@ exports.getMetrics = async (req, res) => {
     const occupancyRate = ((occupiedT / totalT) * 100).toFixed(1);
 
     // 2. Live Operational
+    // Sincronización preventiva: cerrar órdenes que ya tienen factura o cancelar órdenes huérfanas en mesas que ya están libres
+    try {
+      const ghostOrders = await knex('orders as o')
+        .leftJoin('tables_restaurant as t', 'o.table_id', 't.id')
+        .leftJoin('invoices as i', 'o.id', 'i.order_id')
+        .where('o.business_id', businessId)
+        .whereIn('o.status', ['abierta', 'en_preparacion', 'lista'])
+        .where(function() {
+          this.whereNotNull('i.id')
+            .orWhere('t.status', 'libre');
+        })
+        .select('o.id', 'i.id as invoice_id');
+
+      if (ghostOrders.length > 0) {
+        for (const g of ghostOrders) {
+          await knex('orders').where('id', g.id).update({
+            status: g.invoice_id ? 'cerrada' : 'cancelada',
+            updated_at: knex.fn.now()
+          });
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn('Advertencia en sincronización de órdenes activas de mesa:', cleanupErr.message);
+    }
+
+    // Cuentas abiertas: únicamente órdenes en mesas activamente ocupadas y sin facturar
     let openOrdersQuery = knex('orders as o')
       .join('order_items as oi', 'o.id', 'oi.order_id')
+      .join('tables_restaurant as t', 'o.table_id', 't.id')
+      .leftJoin('invoices as i', 'o.id', 'i.order_id')
       .whereIn('o.status', ['abierta', 'en_preparacion', 'lista'])
-      .select(knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as total'), knex.raw('COUNT(DISTINCT o.id) as count'));
+      .whereIn('t.status', ['ocupada', 'pendiente_pago'])
+      .whereNull('i.id')
+      .select(
+        knex.raw('COALESCE(SUM(oi.quantity * oi.unit_price), 0) as total'),
+        knex.raw('COUNT(DISTINCT o.id) as count')
+      );
     addBranchFilter(openOrdersQuery, 'o');
     const openOrdersValue = await openOrdersQuery.first();
 

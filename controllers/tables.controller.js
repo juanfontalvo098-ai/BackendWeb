@@ -32,6 +32,11 @@ exports.getAll = async (req, res) => {
         if (parseInt(itemsCount.count) === 0 && order.status === 'abierta') {
           table.status = 'libre';
           table.current_order = null;
+          await knex('orders').where('id', order.id).update({ status: 'cancelada' }).catch(() => {});
+        } else if (table.status === 'libre') {
+          // Si la mesa en la base de datos está libre, la orden previa debe marcarse como cerrada o cancelada
+          await knex('orders').where('id', order.id).update({ status: 'cancelada' }).catch(() => {});
+          table.current_order = null;
         } else {
           table.current_order = order;
         }
@@ -111,6 +116,14 @@ exports.updateTable = async (req, res) => {
         status: status || 'libre'
       });
 
+    if (status === 'libre') {
+      await knex('orders')
+        .where({ table_id: id, business_id: businessId })
+        .whereIn('status', ['abierta', 'en_preparacion', 'lista'])
+        .update({ status: 'cancelada', updated_at: knex.fn.now() })
+        .catch(() => {});
+    }
+
     if (req.app.locals.io && branchId) {
       req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', {
         table_id: id, status: status || 'libre'
@@ -163,6 +176,14 @@ exports.updateStatus = async (req, res) => {
     await knex('tables_restaurant')
       .where({ id: req.params.id, business_id: businessId })
       .update({ status });
+
+    if (status === 'libre') {
+      await knex('orders')
+        .where({ table_id: req.params.id, business_id: businessId })
+        .whereIn('status', ['abierta', 'en_preparacion', 'lista'])
+        .update({ status: 'cancelada', updated_at: knex.fn.now() })
+        .catch(() => {});
+    }
 
     if (req.app.locals.io && branchId) {
       req.app.locals.io.to(`branch:${branchId}`).emit('table:status-changed', {

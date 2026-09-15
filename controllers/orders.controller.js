@@ -270,11 +270,12 @@ exports.create = async (req, res) => {
                 }).returning('*');
 
                 let modsText = '';
+                let parsedMods = [];
                 if (modifiersJson) {
                   try {
-                    const parsed = JSON.parse(modifiersJson);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                      modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                    parsedMods = typeof modifiersJson === 'string' ? JSON.parse(modifiersJson) : modifiersJson;
+                    if (Array.isArray(parsedMods) && parsedMods.length > 0) {
+                      modsText = parsedMods.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
                     }
                   } catch (e) {}
                 }
@@ -283,7 +284,7 @@ exports.create = async (req, res) => {
                   name: prod.name,
                   quantity: inserted ? inserted.quantity : (parseInt(item.quantity, 10) || 1),
                   notes: item.notes || null,
-                  modifiers: modsText || undefined,
+                  modifiers: (Array.isArray(parsedMods) && parsedMods.length > 0) ? parsedMods : (modsText || undefined),
                   modifiers_json: modifiersJson
                 });
               }
@@ -366,11 +367,12 @@ exports.create = async (req, res) => {
             }).returning('*');
 
             let modsText = '';
+            let parsedMods = [];
             if (modifiersJson) {
               try {
-                const parsed = JSON.parse(modifiersJson);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                  modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                parsedMods = typeof modifiersJson === 'string' ? JSON.parse(modifiersJson) : modifiersJson;
+                if (Array.isArray(parsedMods) && parsedMods.length > 0) {
+                  modsText = parsedMods.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
                 }
               } catch (e) {}
             }
@@ -379,7 +381,7 @@ exports.create = async (req, res) => {
               name: prod.name,
               quantity: inserted ? inserted.quantity : (parseInt(item.quantity, 10) || 1),
               notes: item.notes || null,
-              modifiers: modsText || undefined,
+              modifiers: (Array.isArray(parsedMods) && parsedMods.length > 0) ? parsedMods : (modsText || undefined),
               modifiers_json: modifiersJson
             });
           }
@@ -636,11 +638,12 @@ exports.updateOrder = async (req, res) => {
           if (pendingOrderItems.length > 0) {
             kitchenItemsToSend = pendingOrderItems.map(i => {
               let modsText = '';
+              let parsedMods = [];
               if (i.modifiers_json) {
                 try {
-                  const parsed = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
-                  if (Array.isArray(parsed) && parsed.length > 0) {
-                    modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                  parsedMods = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
+                  if (Array.isArray(parsedMods) && parsedMods.length > 0) {
+                    modsText = parsedMods.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
                   }
                 } catch (e) {}
               }
@@ -648,7 +651,7 @@ exports.updateOrder = async (req, res) => {
                 name: i.name,
                 quantity: i.quantity,
                 notes: i.notes || null,
-                modifiers: modsText || undefined,
+                modifiers: (Array.isArray(parsedMods) && parsedMods.length > 0) ? parsedMods : (modsText || undefined),
                 modifiers_json: i.modifiers_json
               };
             });
@@ -925,11 +928,12 @@ exports.sendToKitchen = async (req, res) => {
 
     const itemsJson = pendingItems.map(i => {
       let modsText = '';
+      let parsedMods = [];
       if (i.modifiers_json) {
         try {
-          const parsed = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+          parsedMods = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
+          if (Array.isArray(parsedMods) && parsedMods.length > 0) {
+            modsText = parsedMods.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
           }
         } catch (e) {}
       }
@@ -937,7 +941,7 @@ exports.sendToKitchen = async (req, res) => {
         name: i.name,
         quantity: i.quantity,
         notes: i.notes || null,
-        modifiers: modsText || undefined,
+        modifiers: (Array.isArray(parsedMods) && parsedMods.length > 0) ? parsedMods : (modsText || undefined),
         modifiers_json: i.modifiers_json
       };
     });
@@ -1313,11 +1317,12 @@ exports.getKitchenActiveTickets = async (req, res) => {
         if (oItems.length > 0) {
           const formatted = oItems.map(i => {
             let modsText = '';
+            let parsedMods = [];
             if (i.modifiers_json) {
               try {
-                const parsed = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                  modsText = parsed.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
+                parsedMods = typeof i.modifiers_json === 'string' ? JSON.parse(i.modifiers_json) : i.modifiers_json;
+                if (Array.isArray(parsedMods) && parsedMods.length > 0) {
+                  modsText = parsedMods.map(m => m.name + (m.quantity > 1 ? ` (x${m.quantity})` : '')).join(', ');
                 }
               } catch (e) {}
             }
@@ -1325,7 +1330,7 @@ exports.getKitchenActiveTickets = async (req, res) => {
               name: i.name,
               quantity: i.quantity,
               notes: i.notes || null,
-              modifiers: modsText || undefined,
+              modifiers: (Array.isArray(parsedMods) && parsedMods.length > 0) ? parsedMods : (modsText || undefined),
               modifiers_json: i.modifiers_json
             };
           });

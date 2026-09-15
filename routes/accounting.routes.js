@@ -8,6 +8,7 @@ router.use(auth, tenantMiddleware);
 
 // Dashboard Financiero General
 router.get('/dashboard', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getFinancialDashboard);
+router.get('/income-expenses', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getIncomeExpenses);
 
 // Plan de cuentas
 router.get('/accounts', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getChartOfAccounts);

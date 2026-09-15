@@ -79,7 +79,7 @@ exports.create = async (req, res) => {
   try {
     const { businessId, branchId } = req.tenant;
     const userId = req.user.id;
-    const { supplier_id, order_date, expected_date, notes, items, tax_rate, tax_total } = req.body;
+    const { supplier_id, order_date, expected_date, notes, items, tax_rate, tax_total, status } = req.body;
 
     if (!supplier_id || !items || items.length === 0) {
       return res.status(400).json({ error: 'Proveedor e ítems son requeridos' });
@@ -117,6 +117,7 @@ exports.create = async (req, res) => {
         branch_id: targetBranchId,
         supplier_id,
         order_number: orderNumber,
+        status: status || 'borrador',
         order_date: order_date || new Date().toISOString().slice(0, 10),
         expected_date: expected_date || null,
         subtotal,
@@ -154,7 +155,7 @@ exports.update = async (req, res) => {
   try {
     const { businessId } = req.tenant;
     const { id } = req.params;
-    const { supplier_id, order_date, expected_date, notes, status } = req.body;
+    const { supplier_id, order_date, expected_date, notes, status, items, tax_rate, tax_total } = req.body;
 
     const po = await knex('purchase_orders').where({ id, business_id: businessId }).first();
     if (!po) return res.status(404).json({ error: 'OC no encontrada' });
@@ -162,15 +163,67 @@ exports.update = async (req, res) => {
       return res.status(400).json({ error: 'No se puede modificar una OC recibida o cancelada' });
     }
 
-    const updateData = { updated_at: knex.fn.now() };
-    if (supplier_id) updateData.supplier_id = supplier_id;
-    if (order_date) updateData.order_date = order_date;
-    if (expected_date !== undefined) updateData.expected_date = expected_date || null;
-    if (notes !== undefined) updateData.notes = notes || null;
-    if (status) updateData.status = status;
+    await knex.transaction(async (trx) => {
+      const updateData = { updated_at: trx.fn.now() };
+      if (supplier_id) updateData.supplier_id = supplier_id;
+      if (order_date) updateData.order_date = order_date;
+      if (expected_date !== undefined) updateData.expected_date = expected_date || null;
+      if (notes !== undefined) updateData.notes = notes || null;
+      if (status) updateData.status = status;
 
-    await knex('purchase_orders').where({ id }).update(updateData);
-    res.json({ message: 'Orden de compra actualizada' });
+      if (items && Array.isArray(items) && items.length > 0) {
+        let subtotal = 0;
+        items.forEach(i => {
+          subtotal += parseFloat(i.unit_cost || 0) * parseFloat(i.quantity_ordered || 0);
+        });
+
+        let calculatedTax = 0;
+        if (tax_total !== undefined && tax_total !== null) {
+          calculatedTax = parseFloat(tax_total) || 0;
+        } else if (tax_rate !== undefined && tax_rate !== null && !isNaN(parseFloat(tax_rate))) {
+          calculatedTax = subtotal * (parseFloat(tax_rate) / 100);
+        } else {
+          calculatedTax = parseFloat(po.tax_total || 0);
+        }
+
+        updateData.subtotal = subtotal;
+        updateData.tax_total = calculatedTax;
+        updateData.total = subtotal + calculatedTax;
+
+        // Preservar cantidades recibidas si ya existen ítems recibidos
+        const existingItems = await trx('purchase_order_items').where('purchase_order_id', id);
+        const existingReceivedMap = {};
+        existingItems.forEach(ei => {
+          const key = ei.supply_id ? `supply_${ei.supply_id}` : `prod_${ei.product_id}`;
+          existingReceivedMap[key] = parseFloat(ei.quantity_received || 0);
+        });
+
+        await trx('purchase_order_items').where('purchase_order_id', id).del();
+
+        for (const item of items) {
+          const isSupply = item.item_type === 'insumo' || Boolean(item.supply_id);
+          const supplyId = isSupply ? (item.supply_id || item.id) : null;
+          const productId = !isSupply ? (item.product_id || item.id) : null;
+          const key = isSupply ? `supply_${supplyId}` : `prod_${productId}`;
+          const prevReceived = existingReceivedMap[key] || 0;
+
+          await trx('purchase_order_items').insert({
+            purchase_order_id: id,
+            item_type: isSupply ? 'insumo' : 'producto',
+            supply_id: supplyId,
+            product_id: productId,
+            quantity_ordered: parseFloat(item.quantity_ordered),
+            quantity_received: prevReceived,
+            unit_cost: parseFloat(item.unit_cost || 0),
+            subtotal: parseFloat(item.unit_cost || 0) * parseFloat(item.quantity_ordered || 0)
+          });
+        }
+      }
+
+      await trx('purchase_orders').where({ id }).update(updateData);
+    });
+
+    res.json({ message: 'Orden de compra actualizada exitosamente' });
   } catch (err) {
     console.error('Error al actualizar OC:', err);
     res.status(500).json({ error: 'Error al actualizar orden de compra' });

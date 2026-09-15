@@ -616,15 +616,38 @@ exports.getFinancialDashboard = async (req, res) => {
       .select(knex.raw('COALESCE(SUM(jel.debit - jel.credit), 0)::float as total_expenses'))
       .first();
 
+    // 5. Egresos operativos directos de turnos de caja (excluyendo nómina para no duplicar)
+    const cashOutflowsData = await knex('cash_movements as cm')
+      .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
+      .where('cr.business_id', businessId)
+      .whereIn('cm.type', ['egreso', 'retiro', 'gasto'])
+      .whereRaw('DATE(cm.created_at) BETWEEN ? AND ?', [start, end])
+      .whereRaw("LOWER(COALESCE(cm.description, '')) NOT LIKE '%pago n%'")
+      .select(knex.raw('COALESCE(SUM(cm.amount), 0)::float as total_cash_expenses'))
+      .first();
+
+    // 6. Pagos a proveedores en el período
+    const apPaymentsData = await knex('accounts_payable')
+      .where('business_id', businessId)
+      .whereRaw('DATE(updated_at) BETWEEN ? AND ?', [start, end])
+      .select(knex.raw('COALESCE(SUM(paid_amount), 0)::float as total_ap_paid'))
+      .first();
+
     const totalSales = salesData?.total_sales || 0;
     const totalPayroll = payrollData?.total_payroll || 0;
-    const totalExpenses = expensesFromJournal?.total_expenses || totalPayroll;
+    const totalCashExpenses = cashOutflowsData?.total_cash_expenses || 0;
+    const totalAPPaid = apPaymentsData?.total_ap_paid || 0;
+
+    const operationalExpenses = totalPayroll + totalCashExpenses;
+    const totalExpenses = Math.max(expensesFromJournal?.total_expenses || 0, operationalExpenses);
     const netProfit = totalSales - totalExpenses;
 
     res.json({
       period: { startDate: start, endDate: end },
       totalSales,
       totalPayroll,
+      totalCashExpenses,
+      totalAPPaid,
       totalExpenses,
       netProfit,
       totalAR: arData?.total_ar || 0,
@@ -635,6 +658,202 @@ exports.getFinancialDashboard = async (req, res) => {
   } catch (err) {
     console.error('Error al obtener dashboard financiero:', err);
     res.status(500).json({ error: 'Error al obtener dashboard financiero' });
+  }
+};
+
+// ==================== FLUJO INTEGRAL: INGRESOS Y GASTOS ====================
+
+exports.getIncomeExpenses = async (req, res) => {
+  try {
+    const { businessId, branchId } = req.tenant;
+    const { startDate, endDate, type, search } = req.query;
+
+    const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
+    const end = endDate || new Date().toISOString().slice(0, 10);
+
+    const items = [];
+
+    // 1. Ingresos: Facturas de Venta POS
+    let invQuery = knex('invoices as inv')
+      .join('users as u', 'inv.user_id', 'u.id')
+      .leftJoin('branches as b', 'inv.branch_id', 'b.id')
+      .where('inv.business_id', businessId)
+      .whereRaw('DATE(inv.created_at) BETWEEN ? AND ?', [start, end])
+      .select(
+        'inv.id',
+        'inv.invoice_number',
+        'inv.total as amount',
+        'inv.payment_method',
+        'inv.created_at',
+        'u.full_name as user_name',
+        knex.raw("COALESCE(b.name, 'Principal') as branch_name")
+      );
+
+    if (branchId) invQuery.andWhere('inv.branch_id', branchId);
+    const invoices = await invQuery.orderBy('inv.created_at', 'desc');
+
+    invoices.forEach(inv => {
+      items.push({
+        id: `inv-${inv.id}`,
+        type: 'ingreso',
+        category: 'Venta POS',
+        reference: inv.invoice_number || `Factura #${inv.id}`,
+        description: `Venta POS - Factura ${inv.invoice_number || `#${inv.id}`}`,
+        payment_method: inv.payment_method || 'efectivo',
+        amount: parseFloat(inv.amount || 0),
+        user_name: inv.user_name || 'Cajero',
+        branch_name: inv.branch_name,
+        date: inv.created_at
+      });
+    });
+
+    // 2. Movimientos de Caja (Ingresos y Egresos de turnos)
+    let movQuery = knex('cash_movements as cm')
+      .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
+      .join('users as u', 'cr.user_id', 'u.id')
+      .leftJoin('branches as b', 'cr.branch_id', 'b.id')
+      .where('cr.business_id', businessId)
+      .whereRaw('DATE(cm.created_at) BETWEEN ? AND ?', [start, end])
+      .select(
+        'cm.id',
+        'cm.type',
+        'cm.amount',
+        'cm.payment_method',
+        'cm.description',
+        'cm.created_at',
+        'u.full_name as user_name',
+        knex.raw("COALESCE(b.name, 'Principal') as branch_name")
+      );
+
+    if (branchId) movQuery.andWhere('cr.branch_id', branchId);
+    const movements = await movQuery.orderBy('cm.created_at', 'desc');
+
+    movements.forEach(m => {
+      const isIngreso = m.type === 'ingreso';
+      const desc = m.description || (isIngreso ? 'Ingreso de Caja' : 'Egreso de Caja');
+      const descLower = desc.toLowerCase();
+
+      // Si es egreso por nómina, se representará en la sección de nómina para mostrar detalles del empleado
+      if (!isIngreso && (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina'))) {
+        return;
+      }
+
+      items.push({
+        id: `mov-${m.id}`,
+        type: isIngreso ? 'ingreso' : 'gasto',
+        category: isIngreso ? 'Ingreso de Caja / Abono' : 'Egreso / Gasto de Caja',
+        reference: `MOV-${m.id}`,
+        description: desc,
+        payment_method: m.payment_method || 'efectivo',
+        amount: parseFloat(m.amount || 0),
+        user_name: m.user_name || 'Cajero',
+        branch_name: m.branch_name,
+        date: m.created_at
+      });
+    });
+
+    // 3. Nómina y Liquidaciones Pagadas
+    let payQuery = knex('payroll as p')
+      .join('employees as e', 'p.employee_id', 'e.id')
+      .where('p.business_id', businessId)
+      .whereIn('p.status', ['pagada', 'aprobada'])
+      .whereRaw('DATE(COALESCE(p.paid_at, p.period_start)) BETWEEN ? AND ?', [start, end])
+      .select(
+        'p.id',
+        'p.net_pay as amount',
+        'p.payment_type',
+        'p.days_worked',
+        'p.notes',
+        'p.paid_at',
+        'p.period_start',
+        'p.created_at',
+        knex.raw("e.first_name || ' ' || e.last_name as employee_name")
+      );
+
+    const payrollRows = await payQuery.orderBy('p.id', 'desc');
+
+    payrollRows.forEach(p => {
+      items.push({
+        id: `pay-${p.id}`,
+        type: 'gasto',
+        category: 'Nómina & Jornales',
+        reference: `NOM-${p.id}`,
+        description: `Pago a ${p.employee_name}: ${p.notes || `Liquidación ${p.payment_type} (${p.days_worked} días)`}`,
+        payment_method: 'efectivo / transferencia',
+        amount: parseFloat(p.amount || 0),
+        user_name: p.employee_name,
+        branch_name: 'Sucursal',
+        date: p.paid_at || p.period_start || p.created_at
+      });
+    });
+
+    // 4. Cuentas por Pagar (CxP) a Proveedores
+    let apQuery = knex('accounts_payable as ap')
+      .join('suppliers as s', 'ap.supplier_id', 's.id')
+      .where('ap.business_id', businessId)
+      .where('ap.paid_amount', '>', 0)
+      .whereRaw('DATE(ap.updated_at) BETWEEN ? AND ?', [start, end])
+      .select(
+        'ap.id',
+        'ap.paid_amount as amount',
+        'ap.notes',
+        'ap.updated_at',
+        's.name as supplier_name'
+      );
+
+    const apRows = await apQuery.orderBy('ap.updated_at', 'desc');
+    apRows.forEach(ap => {
+      items.push({
+        id: `ap-${ap.id}`,
+        type: 'gasto',
+        category: 'Pago a Proveedor (CxP)',
+        reference: `CXP-${ap.id}`,
+        description: `Pago proveedor: ${ap.supplier_name}${ap.notes ? ` (${ap.notes})` : ''}`,
+        payment_method: 'transferencia / contado',
+        amount: parseFloat(ap.amount || 0),
+        user_name: ap.supplier_name,
+        branch_name: 'Sucursal',
+        date: ap.updated_at
+      });
+    });
+
+    // Ordenar cronológicamente descendente
+    items.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Totales globales del período
+    const totalIncome = items.filter(i => i.type === 'ingreso').reduce((sum, i) => sum + i.amount, 0);
+    const totalExpense = items.filter(i => i.type === 'gasto').reduce((sum, i) => sum + i.amount, 0);
+    const netBalance = totalIncome - totalExpense;
+
+    // Aplicar filtros de tipo y búsqueda
+    let filteredItems = items;
+    if (type && type !== 'todos' && type !== 'all') {
+      filteredItems = filteredItems.filter(i => i.type === type);
+    }
+    if (search) {
+      const q = search.toLowerCase().trim();
+      filteredItems = filteredItems.filter(i =>
+        (i.description || '').toLowerCase().includes(q) ||
+        (i.reference || '').toLowerCase().includes(q) ||
+        (i.user_name || '').toLowerCase().includes(q) ||
+        (i.category || '').toLowerCase().includes(q) ||
+        (i.payment_method || '').toLowerCase().includes(q)
+      );
+    }
+
+    res.json({
+      period: { startDate: start, endDate: end },
+      summary: {
+        totalIncome,
+        totalExpense,
+        netBalance,
+        totalCount: items.length
+      },
+      items: filteredItems
+    });
+  } catch (err) {
+    console.error('Error al obtener ingresos y gastos:', err);
+    res.status(500).json({ error: 'Error al obtener ingresos y gastos: ' + err.message });
   }
 };
 
@@ -740,9 +959,9 @@ exports.createReceivable = async (req, res) => {
 
 exports.recordReceivablePayment = async (req, res) => {
   try {
-    const { businessId } = req.tenant;
+    const { businessId, branchId } = req.tenant;
     const { id } = req.params;
-    const { amount } = req.body;
+    const { amount, payment_method } = req.body;
 
     const numAmount = parseFloat(amount);
     if (!numAmount || numAmount <= 0) {
@@ -764,10 +983,60 @@ exports.recordReceivablePayment = async (req, res) => {
     });
 
     // Disminuir saldo de crédito del cliente
+    let customerName = 'Cliente';
     if (ar.customer_id) {
+      const customer = await knex('customers').where({ id: ar.customer_id, business_id: businessId }).first();
+      if (customer) customerName = customer.name;
       await knex('customers')
         .where({ id: ar.customer_id, business_id: businessId })
         .decrement('credit_balance', Math.min(parseFloat(numAmount), parseFloat(ar.balance || numAmount)));
+    }
+
+    // Obtener información de factura
+    let invoiceInfo = '';
+    if (ar.invoice_id) {
+      const inv = await knex('invoices').where({ id: ar.invoice_id }).first();
+      if (inv) invoiceInfo = inv.invoice_number ? `Factura ${inv.invoice_number}` : `Factura #${inv.id}`;
+    }
+
+    // Registrar ingreso en la caja abierta del turno activo si existe
+    const selectedMethod = (payment_method || 'efectivo').toLowerCase().trim();
+    let regQuery = knex('cash_registers')
+      .where('business_id', businessId)
+      .andWhereRaw("LOWER(status) = 'abierta'");
+    if (ar.branch_id || branchId) {
+      regQuery.andWhere('branch_id', ar.branch_id || branchId);
+    }
+    const activeRegister = await regQuery.orderBy('id', 'desc').first();
+
+    if (activeRegister) {
+      const descText = `Abono a crédito: ${customerName} (${invoiceInfo || `CxC #${ar.id}`})`;
+      const [cashMovement] = await knex('cash_movements').insert({
+        cash_register_id: activeRegister.id,
+        type: 'ingreso',
+        amount: numAmount,
+        payment_method: selectedMethod,
+        description: descText
+      }).returning('*');
+
+      try {
+        await createJournalEntryForCashMovement(knex, cashMovement, businessId, activeRegister.branch_id, req.user?.id || activeRegister.user_id);
+      } catch (jErr) {
+        console.warn('Advertencia al asentar movimiento de abono en contabilidad:', jErr.message);
+      }
+
+      if (req.app?.locals?.io) {
+        const io = req.app.locals.io;
+        const bId = activeRegister.branch_id;
+        if (bId) {
+          io.to(`branch:${bId}`).emit('cash:movement-added', cashMovement);
+          io.to(`branch:${bId}`).emit('cash:status-changed', { status: 'abierta', register: activeRegister });
+        }
+        if (businessId) {
+          io.to(`business:${businessId}`).emit('cash:movement-added', cashMovement);
+          io.to(`business:${businessId}`).emit('cash:status-changed', { status: 'abierta', register: activeRegister });
+        }
+      }
     }
 
     // Si la cuenta por cobrar quedó saldada (saldo 0), cerrar definitivamente la orden
@@ -1241,10 +1510,16 @@ const createJournalEntryForCashMovement = async (db, movement, businessId, branc
       description: `Entrada de efectivo (${paymentMethod})`
     });
 
-    // Crédito a Ingresos
+    // Crédito a Ingresos o Cartera (1.1.03) si es un abono a crédito
+    let creditAccount = generalIncomeAccount;
+    if (descLower.includes('abono') || descLower.includes('crédito') || descLower.includes('credito') || descLower.includes('cartera')) {
+      const arAccount = await db('chart_of_accounts').where({ business_id: businessId, code: '1.1.03' }).first();
+      if (arAccount) creditAccount = arAccount;
+    }
+
     await db('journal_entry_lines').insert({
       journal_entry_id: jEntry.id,
-      account_id: generalIncomeAccount.id,
+      account_id: creditAccount.id,
       debit: 0,
       credit: amt,
       description: `Ingreso por ${movement.description || 'Entrada adicional'}`
@@ -1281,6 +1556,11 @@ exports.syncCashMovementsToJournal = async (req, res) => {
         .first();
 
       if (!existing) {
+        const descLower = (mov.description || '').toLowerCase();
+        // Si el movimiento proviene de liquidación de nómina, ya tiene su asiento oficial con reference_type: 'payroll'
+        if (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina')) {
+          continue;
+        }
         await createJournalEntryForCashMovement(knex, mov, businessId, mov.branch_id || branchId, mov.cashier_id || userId);
         createdCount++;
       }

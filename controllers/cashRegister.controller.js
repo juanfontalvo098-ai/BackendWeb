@@ -149,16 +149,19 @@ exports.getShiftSummary = async (req, res) => {
       const tAmt = parseFloat(inv.transfer_amount || 0);
       const kAmt = parseFloat(inv.card_amount || 0);
 
+      const method = String(inv.payment_method || '').toLowerCase().trim();
+      const isCredit = method.includes('credito') || method.includes('crédito');
+
       if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
         cashSales += cAmt;
         transferSales += tAmt;
         cardSales += kAmt;
         const rem = total - (cAmt + tAmt + kAmt);
-        if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
-      } else if (inv.payment_method === 'efectivo') cashSales += total;
-      else if (inv.payment_method === 'tarjeta') cardSales += total;
-      else if (inv.payment_method === 'transferencia') transferSales += total;
-      else if (inv.payment_method === 'credito') creditSales += total;
+        if (rem > 0 && isCredit) creditSales += rem;
+      } else if (method === 'efectivo') cashSales += total;
+      else if (method === 'tarjeta') cardSales += total;
+      else if (method === 'transferencia') transferSales += total;
+      else if (isCredit) creditSales += total;
       else cashSales += total;
     });
 
@@ -186,12 +189,16 @@ exports.getShiftSummary = async (req, res) => {
       .select('type', 'amount', 'payment_method')
       .where('cash_register_id', register.id);
 
-    let cashInflows = 0, cashOutflows = 0, cashRefunds = 0;
+    let cashInflows = 0, cashOutflows = 0, cashRefunds = 0, transferInflows = 0;
     movements.forEach(m => {
       const amt = parseFloat(m.amount || 0);
-      if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
-      if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
-      if (m.type === 'devolucion' && m.payment_method === 'efectivo') cashRefunds += amt;
+      const pMethod = String(m.payment_method || 'efectivo').toLowerCase().trim();
+      if (m.type === 'ingreso') {
+        if (pMethod === 'efectivo') cashInflows += amt;
+        else if (pMethod === 'transferencia') transferInflows += amt;
+      }
+      if ((m.type === 'egreso' || m.type === 'retiro' || m.type === 'gasto') && pMethod === 'efectivo') cashOutflows += amt;
+      if (m.type === 'devolucion' && pMethod === 'efectivo') cashRefunds += amt;
     });
 
     // Auditoría: órdenes canceladas del día en esta sucursal
@@ -211,6 +218,7 @@ exports.getShiftSummary = async (req, res) => {
 
     const initialFloat = parseFloat(register.opening_amount || 0);
     const expectedCash = (initialFloat + cashSales + cashInflows) - (cashOutflows + cashRefunds);
+    const expectedTransfers = transferSales + transferInflows;
 
     res.json({
       cash_register_id: register.id,
@@ -220,7 +228,7 @@ exports.getShiftSummary = async (req, res) => {
       openingAmount: initialFloat,
       opening_amount: initialFloat,
       cashSales, cashInflows, cashOutflows, cashRefunds, expectedCash,
-      cardSales, transferSales, creditSales, totalTips,
+      cardSales, transferSales, transferInflows, expectedTransfers, creditSales, totalTips,
       grossRevenue,
       netRevenue,
       totalDeliveryFees,
@@ -274,16 +282,19 @@ exports.close = async (req, res) => {
       const tAmt = parseFloat(inv.transfer_amount || 0);
       const kAmt = parseFloat(inv.card_amount || 0);
 
+      const method = String(inv.payment_method || '').toLowerCase().trim();
+      const isCredit = method.includes('credito') || method.includes('crédito');
+
       if (cAmt > 0 || tAmt > 0 || kAmt > 0) {
         cashSales += cAmt;
         transferSales += tAmt;
         cardSales += kAmt;
         const rem = total - (cAmt + tAmt + kAmt);
-        if (rem > 0 && String(inv.payment_method).includes('crédito')) creditSales += rem;
-      } else if (inv.payment_method === 'efectivo') cashSales += total;
-      else if (inv.payment_method === 'tarjeta') cardSales += total;
-      else if (inv.payment_method === 'transferencia') transferSales += total;
-      else if (inv.payment_method === 'credito') creditSales += total;
+        if (rem > 0 && isCredit) creditSales += rem;
+      } else if (method === 'efectivo') cashSales += total;
+      else if (method === 'tarjeta') cardSales += total;
+      else if (method === 'transferencia') transferSales += total;
+      else if (isCredit) creditSales += total;
       else cashSales += total;
     });
 
@@ -311,22 +322,31 @@ exports.close = async (req, res) => {
       .select('type', 'amount', 'payment_method', 'description', 'created_at')
       .where('cash_register_id', register.id);
 
-    let cashInflows = 0, cashOutflows = 0, cashRefunds = 0;
+    let cashInflows = 0, cashOutflows = 0, cashRefunds = 0, transferInflows = 0;
     movements.forEach(m => {
       const amt = parseFloat(m.amount || 0);
-      if (m.type === 'ingreso' && m.payment_method === 'efectivo') cashInflows += amt;
-      if ((m.type === 'egreso' || m.type === 'retiro') && m.payment_method === 'efectivo') cashOutflows += amt;
-      if (m.type === 'devolucion' && m.payment_method === 'efectivo') cashRefunds += amt;
+      const pMethod = String(m.payment_method || 'efectivo').toLowerCase().trim();
+      if (m.type === 'ingreso') {
+        if (pMethod === 'efectivo') cashInflows += amt;
+        else if (pMethod === 'transferencia') transferInflows += amt;
+      }
+      if ((m.type === 'egreso' || m.type === 'retiro' || m.type === 'gasto') && pMethod === 'efectivo') {
+        cashOutflows += amt;
+      }
+      if (m.type === 'devolucion' && pMethod === 'efectivo') {
+        cashRefunds += amt;
+      }
     });
 
     const initialFloat = parseFloat(register.opening_amount || 0);
     const expected = (initialFloat + cashSales + cashInflows) - (cashOutflows + cashRefunds);
+    const expectedTransfers = transferSales + transferInflows;
     
     const declaredCashVal = parseFloat(closing_amount || 0);
     const diffCash = declaredCashVal - expected;
     const hasDeclaredTransfers = declared_transfers !== undefined && declared_transfers !== null && declared_transfers !== '';
     const declaredTransfersVal = hasDeclaredTransfers ? parseFloat(declared_transfers) : null;
-    const diffTransfers = hasDeclaredTransfers ? (declaredTransfersVal - transferSales) : 0;
+    const diffTransfers = hasDeclaredTransfers ? (declaredTransfersVal - expectedTransfers) : 0;
     const totalDifference = diffCash + diffTransfers;
 
     // Actualizar caja

@@ -517,6 +517,7 @@ exports.liquidateEmployee = async (req, res) => {
       bonuses,
       deductions,
       mark_as_paid,
+      register_cash_expense,
       notes
     } = req.body;
 
@@ -584,6 +585,39 @@ exports.liquidateEmployee = async (req, res) => {
       paid_at: isPaid ? knex.fn.now() : null,
       notes: notes || `Liquidación ${pType} (${days} días laborados @ ${dRate}/día)`
     }).returning('*');
+
+    // Registrar egreso en la caja del turno activo si se solicitó
+    let cashMovementCreated = null;
+    if (isPaid && register_cash_expense && netPay > 0) {
+      let regQuery = knex('cash_registers')
+        .where('business_id', businessId)
+        .andWhereRaw("LOWER(status) = 'abierta'");
+      if (branchId) regQuery.andWhere('branch_id', branchId);
+      const activeRegister = await regQuery.orderBy('id', 'desc').first();
+
+      if (activeRegister) {
+        const [cashMov] = await knex('cash_movements').insert({
+          cash_register_id: activeRegister.id,
+          type: 'egreso',
+          amount: netPay,
+          payment_method: 'efectivo',
+          description: `Pago nómina: ${emp.first_name} ${emp.last_name}${notes ? ` (${notes})` : ''}`
+        }).returning('*');
+        cashMovementCreated = cashMov;
+
+        if (req.app?.locals?.io) {
+          const io = req.app.locals.io;
+          if (branchId) {
+            io.to(`branch:${branchId}`).emit('cash:movement-added', cashMov);
+            io.to(`branch:${branchId}`).emit('cash:status-changed', { status: 'abierta', register: activeRegister });
+          }
+          if (businessId) {
+            io.to(`business:${businessId}`).emit('cash:movement-added', cashMov);
+            io.to(`business:${businessId}`).emit('cash:status-changed', { status: 'abierta', register: activeRegister });
+          }
+        }
+      }
+    }
 
     // Sincronizar automáticamente con el Libro Diario y Contabilidad
     await syncPayrollToAccounting(businessId, branchId, payrollEntry, userId);

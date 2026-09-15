@@ -360,6 +360,16 @@ exports.receive = async (req, res) => {
       });
     });
 
+    // Registrar o actualizar asiento contable en el Libro Diario
+    try {
+      const { createJournalEntryForPurchaseOrder } = require('./accounting.controller');
+      if (createJournalEntryForPurchaseOrder) {
+        await createJournalEntryForPurchaseOrder(knex, id, businessId, targetBranchId, userId);
+      }
+    } catch (jErr) {
+      console.warn('Advertencia al generar asiento contable para OC:', jErr.message);
+    }
+
     res.json({ message: 'Mercancía recibida y stock actualizado exitosamente' });
   } catch (err) {
     console.error('Error al recibir mercancía:', err);
@@ -389,6 +399,16 @@ exports.closeOrder = async (req, res) => {
       notes: updatedNotes,
       updated_at: knex.fn.now()
     });
+
+    // Actualizar asiento contable reflejando el valor final recibido
+    try {
+      const { createJournalEntryForPurchaseOrder } = require('./accounting.controller');
+      if (createJournalEntryForPurchaseOrder) {
+        await createJournalEntryForPurchaseOrder(knex, id, businessId, po.branch_id, po.user_id);
+      }
+    } catch (jErr) {
+      console.warn('Advertencia al actualizar asiento contable al cerrar OC:', jErr.message);
+    }
 
     res.json({ message: 'Orden de compra cerrada y finalizada exitosamente' });
   } catch (err) {

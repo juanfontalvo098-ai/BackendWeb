@@ -633,12 +633,24 @@ exports.getFinancialDashboard = async (req, res) => {
       .select(knex.raw('COALESCE(SUM(paid_amount), 0)::float as total_ap_paid'))
       .first();
 
+    // 7. Compras de mercancía / insumos recibidas (OC) en el período
+    const poReceivedData = await knex('purchase_orders as po')
+      .join('purchase_order_items as poi', 'po.id', 'poi.purchase_order_id')
+      .where('po.business_id', businessId)
+      .whereIn('po.status', ['recibida', 'cerrada', 'parcial'])
+      .whereRaw('DATE(COALESCE(po.received_date, po.order_date, po.created_at)) BETWEEN ? AND ?', [start, end])
+      .select(
+        knex.raw('COALESCE(SUM(poi.quantity_received * poi.unit_cost), 0)::float as total_po_received')
+      )
+      .first();
+
     const totalSales = salesData?.total_sales || 0;
     const totalPayroll = payrollData?.total_payroll || 0;
     const totalCashExpenses = cashOutflowsData?.total_cash_expenses || 0;
     const totalAPPaid = apPaymentsData?.total_ap_paid || 0;
+    const totalPOReceived = poReceivedData?.total_po_received || 0;
 
-    const operationalExpenses = totalPayroll + totalCashExpenses;
+    const operationalExpenses = totalPayroll + totalCashExpenses + totalPOReceived;
     const totalExpenses = Math.max(expensesFromJournal?.total_expenses || 0, operationalExpenses);
     const netProfit = totalSales - totalExpenses;
 
@@ -648,6 +660,7 @@ exports.getFinancialDashboard = async (req, res) => {
       totalPayroll,
       totalCashExpenses,
       totalAPPaid,
+      totalPOReceived,
       totalExpenses,
       netProfit,
       totalAR: arData?.total_ar || 0,
@@ -663,215 +676,515 @@ exports.getFinancialDashboard = async (req, res) => {
 
 // ==================== FLUJO INTEGRAL: INGRESOS Y GASTOS ====================
 
+const fetchIncomeExpensesData = async (knexClient, businessId, branchId, { startDate, endDate, type, search }) => {
+  const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
+  const end = endDate || new Date().toISOString().slice(0, 10);
+
+  const items = [];
+
+  // 1. Ingresos: Facturas de Venta POS
+  let invQuery = knexClient('invoices as inv')
+    .join('users as u', 'inv.user_id', 'u.id')
+    .leftJoin('branches as b', 'inv.branch_id', 'b.id')
+    .where('inv.business_id', businessId)
+    .whereRaw('DATE(inv.created_at) BETWEEN ? AND ?', [start, end])
+    .select(
+      'inv.id',
+      'inv.invoice_number',
+      'inv.total as amount',
+      'inv.payment_method',
+      'inv.created_at',
+      'u.full_name as user_name',
+      knexClient.raw("COALESCE(b.name, 'Principal') as branch_name")
+    );
+
+  if (branchId) invQuery.andWhere('inv.branch_id', branchId);
+  const invoices = await invQuery.orderBy('inv.created_at', 'desc');
+
+  invoices.forEach(inv => {
+    items.push({
+      id: `inv-${inv.id}`,
+      type: 'ingreso',
+      category: 'Venta POS',
+      reference: inv.invoice_number || `Factura #${inv.id}`,
+      description: `Venta POS - Factura ${inv.invoice_number || `#${inv.id}`}`,
+      payment_method: inv.payment_method || 'efectivo',
+      amount: parseFloat(inv.amount || 0),
+      user_name: inv.user_name || 'Cajero',
+      branch_name: inv.branch_name,
+      date: inv.created_at
+    });
+  });
+
+  // 2. Movimientos de Caja Operativos (Ingresos extras, abonos y Egresos de turnos)
+  let movQuery = knexClient('cash_movements as cm')
+    .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
+    .join('users as u', 'cr.user_id', 'u.id')
+    .leftJoin('branches as b', 'cr.branch_id', 'b.id')
+    .where('cr.business_id', businessId)
+    .whereIn('cm.type', ['ingreso', 'egreso', 'retiro', 'gasto'])
+    .whereNot('cm.type', 'venta')
+    .whereRaw("LOWER(COALESCE(cm.description, '')) NOT LIKE 'factura %'")
+    .whereRaw('DATE(cm.created_at) BETWEEN ? AND ?', [start, end])
+    .select(
+      'cm.id',
+      'cm.type',
+      'cm.amount',
+      'cm.payment_method',
+      'cm.description',
+      'cm.created_at',
+      'u.full_name as user_name',
+      knexClient.raw("COALESCE(b.name, 'Principal') as branch_name")
+    );
+
+  if (branchId) movQuery.andWhere('cr.branch_id', branchId);
+  const movements = await movQuery.orderBy('cm.created_at', 'desc');
+
+  movements.forEach(m => {
+    const typeLower = (m.type || '').toLowerCase();
+    const desc = m.description || '';
+    const descLower = desc.toLowerCase();
+
+    // Descartar cualquier movimiento de venta o vinculado a factura POS
+    if (typeLower === 'venta' || descLower.startsWith('factura fac-') || descLower.startsWith('factura #') || descLower.startsWith('factura ')) {
+      return;
+    }
+
+    // Si es egreso por nómina, se representa en la sección de nómina (Sección 3)
+    if (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina')) {
+      return;
+    }
+
+    const isIngreso = typeLower === 'ingreso';
+    const isGasto = ['egreso', 'retiro', 'gasto'].includes(typeLower);
+
+    if (!isIngreso && !isGasto) return;
+
+    const category = isIngreso
+      ? (descLower.includes('abono') ? 'Abono a Cartera / CxC' : 'Ingreso de Caja')
+      : 'Egreso / Gasto de Caja';
+
+    items.push({
+      id: `mov-${m.id}`,
+      type: isIngreso ? 'ingreso' : 'gasto',
+      category,
+      reference: `MOV-${m.id}`,
+      description: desc || (isIngreso ? 'Ingreso de Caja' : 'Egreso de Caja'),
+      payment_method: m.payment_method || 'efectivo',
+      amount: parseFloat(m.amount || 0),
+      user_name: m.user_name || 'Cajero',
+      branch_name: m.branch_name,
+      date: m.created_at
+    });
+  });
+
+  // 3. Nómina y Liquidaciones Pagadas
+  let payQuery = knexClient('payroll as p')
+    .join('employees as e', 'p.employee_id', 'e.id')
+    .where('p.business_id', businessId)
+    .whereIn('p.status', ['pagada', 'aprobada'])
+    .whereRaw('DATE(COALESCE(p.paid_at, p.period_start)) BETWEEN ? AND ?', [start, end])
+    .select(
+      'p.id',
+      'p.net_pay as amount',
+      'p.payment_type',
+      'p.days_worked',
+      'p.notes',
+      'p.paid_at',
+      'p.period_start',
+      'p.created_at',
+      knexClient.raw("e.first_name || ' ' || e.last_name as employee_name")
+    );
+
+  const payrollRows = await payQuery.orderBy('p.id', 'desc');
+
+  payrollRows.forEach(p => {
+    items.push({
+      id: `pay-${p.id}`,
+      type: 'gasto',
+      category: 'Nómina & Jornales',
+      reference: `NOM-${p.id}`,
+      description: `Pago a ${p.employee_name}: ${p.notes || `Liquidación ${p.payment_type} (${p.days_worked} días)`}`,
+      payment_method: 'efectivo / transferencia',
+      amount: parseFloat(p.amount || 0),
+      user_name: p.employee_name,
+      branch_name: 'Sucursal',
+      date: p.paid_at || p.period_start || p.created_at
+    });
+  });
+
+  // 4. Cuentas por Pagar (CxP) a Proveedores
+  let apQuery = knexClient('accounts_payable as ap')
+    .join('suppliers as s', 'ap.supplier_id', 's.id')
+    .where('ap.business_id', businessId)
+    .where('ap.paid_amount', '>', 0)
+    .whereRaw('DATE(ap.updated_at) BETWEEN ? AND ?', [start, end])
+    .select(
+      'ap.id',
+      'ap.paid_amount as amount',
+      'ap.notes',
+      'ap.purchase_order_id',
+      'ap.updated_at',
+      's.name as supplier_name'
+    );
+
+  const apRows = await apQuery.orderBy('ap.updated_at', 'desc');
+  const paidPoIdsFromAp = [];
+  apRows.forEach(ap => {
+    if (ap.purchase_order_id) paidPoIdsFromAp.push(ap.purchase_order_id);
+    items.push({
+      id: `ap-${ap.id}`,
+      type: 'gasto',
+      category: 'Pago a Proveedor (CxP)',
+      reference: `CXP-${ap.id}`,
+      description: `Pago proveedor: ${ap.supplier_name}${ap.notes ? ` (${ap.notes})` : ''}`,
+      payment_method: 'transferencia / contado',
+      amount: parseFloat(ap.amount || 0),
+      user_name: ap.supplier_name,
+      branch_name: 'Sucursal',
+      date: ap.updated_at
+    });
+  });
+
+  // 5. Órdenes de Compra (OC) Recibidas / Finalizadas (Insumos y Mercancía)
+  let poQuery = knexClient('purchase_orders as po')
+    .join('suppliers as s', 'po.supplier_id', 's.id')
+    .leftJoin('users as u', 'po.user_id', 'u.id')
+    .leftJoin('branches as b', 'po.branch_id', 'b.id')
+    .where('po.business_id', businessId)
+    .whereIn('po.status', ['recibida', 'cerrada', 'parcial'])
+    .whereRaw('DATE(COALESCE(po.received_date, po.order_date, po.created_at)) BETWEEN ? AND ?', [start, end])
+    .select(
+      'po.*',
+      's.name as supplier_name',
+      'u.full_name as user_name',
+      knexClient.raw("COALESCE(b.name, 'Principal') as branch_name")
+    );
+
+  if (branchId) poQuery.andWhere('po.branch_id', branchId);
+  const purchaseOrders = await poQuery.orderBy('po.created_at', 'desc');
+
+  if (purchaseOrders.length > 0) {
+    const poIds = purchaseOrders.map(p => p.id);
+    const poItems = await knexClient('purchase_order_items as poi')
+      .leftJoin('products as p', 'poi.product_id', 'p.id')
+      .leftJoin('supplies as s', 'poi.supply_id', 's.id')
+      .whereIn('poi.purchase_order_id', poIds)
+      .select(
+        'poi.*',
+        knexClient.raw("COALESCE(s.name, p.name, 'Artículo') as item_name")
+      );
+
+    const itemsByPo = {};
+    poItems.forEach(item => {
+      if (!itemsByPo[item.purchase_order_id]) itemsByPo[item.purchase_order_id] = [];
+      itemsByPo[item.purchase_order_id].push(item);
+    });
+
+    purchaseOrders.forEach(po => {
+      // Si la orden ya se encuentra registrada como pago en accounts_payable arriba, omitir para no duplicar
+      if (paidPoIdsFromAp.includes(po.id)) return;
+
+      const itemsForPo = itemsByPo[po.id] || [];
+      let receivedSubtotal = 0;
+      const receivedItemNames = [];
+
+      itemsForPo.forEach(i => {
+        const qtyRec = parseFloat(i.quantity_received || 0);
+        if (qtyRec > 0) {
+          receivedSubtotal += qtyRec * parseFloat(i.unit_cost || 0);
+          receivedItemNames.push(`${i.item_name} (x${qtyRec})`);
+        }
+      });
+
+      // Si no se recibió mercancía, el gasto ejecutado es $0
+      if (receivedSubtotal <= 0) return;
+
+      const poTaxTotal = parseFloat(po.tax_total || 0);
+      const poSubtotal = parseFloat(po.subtotal || 0);
+      const taxRatio = poSubtotal > 0 && poTaxTotal > 0 ? (poTaxTotal / poSubtotal) : 0;
+      const receivedTax = receivedSubtotal * taxRatio;
+      const receivedTotal = parseFloat((receivedSubtotal + receivedTax).toFixed(2));
+
+      const itemSummary = receivedItemNames.slice(0, 3).join(', ') + (receivedItemNames.length > 3 ? ` (+${receivedItemNames.length - 3} más)` : '');
+
+      items.push({
+        id: `po-${po.id}`,
+        type: 'gasto',
+        category: 'Compra Insumos / Mercancía (OC)',
+        reference: po.order_number,
+        description: `Compra a ${po.supplier_name}: ${itemSummary || po.notes || 'Recepción de orden de compra'}`,
+        payment_method: 'contado / crédito',
+        amount: receivedTotal,
+        user_name: po.supplier_name || po.user_name || 'Proveedor',
+        branch_name: po.branch_name,
+        date: po.received_date || po.order_date || po.created_at
+      });
+    });
+  }
+
+  // Ordenar cronológicamente descendente
+  items.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  // Totales globales del período
+  const totalIncome = items.filter(i => i.type === 'ingreso').reduce((sum, i) => sum + i.amount, 0);
+  const totalExpense = items.filter(i => i.type === 'gasto').reduce((sum, i) => sum + i.amount, 0);
+  const netBalance = totalIncome - totalExpense;
+
+  // Aplicar filtros de tipo y búsqueda
+  let filteredItems = items;
+  if (type && type !== 'todos' && type !== 'all') {
+    filteredItems = filteredItems.filter(i => i.type === type);
+  }
+  if (search) {
+    const q = search.toLowerCase().trim();
+    filteredItems = filteredItems.filter(i =>
+      (i.description || '').toLowerCase().includes(q) ||
+      (i.reference || '').toLowerCase().includes(q) ||
+      (i.user_name || '').toLowerCase().includes(q) ||
+      (i.category || '').toLowerCase().includes(q) ||
+      (i.payment_method || '').toLowerCase().includes(q)
+    );
+  }
+
+  return {
+    period: { startDate: start, endDate: end },
+    summary: {
+      totalIncome,
+      totalExpense,
+      netBalance,
+      totalCount: items.length
+    },
+    items: filteredItems
+  };
+};
+
 exports.getIncomeExpenses = async (req, res) => {
   try {
     const { businessId, branchId } = req.tenant;
     const { startDate, endDate, type, search } = req.query;
 
-    const start = startDate || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
-    const end = endDate || new Date().toISOString().slice(0, 10);
-
-    const items = [];
-
-    // 1. Ingresos: Facturas de Venta POS
-    let invQuery = knex('invoices as inv')
-      .join('users as u', 'inv.user_id', 'u.id')
-      .leftJoin('branches as b', 'inv.branch_id', 'b.id')
-      .where('inv.business_id', businessId)
-      .whereRaw('DATE(inv.created_at) BETWEEN ? AND ?', [start, end])
-      .select(
-        'inv.id',
-        'inv.invoice_number',
-        'inv.total as amount',
-        'inv.payment_method',
-        'inv.created_at',
-        'u.full_name as user_name',
-        knex.raw("COALESCE(b.name, 'Principal') as branch_name")
-      );
-
-    if (branchId) invQuery.andWhere('inv.branch_id', branchId);
-    const invoices = await invQuery.orderBy('inv.created_at', 'desc');
-
-    invoices.forEach(inv => {
-      items.push({
-        id: `inv-${inv.id}`,
-        type: 'ingreso',
-        category: 'Venta POS',
-        reference: inv.invoice_number || `Factura #${inv.id}`,
-        description: `Venta POS - Factura ${inv.invoice_number || `#${inv.id}`}`,
-        payment_method: inv.payment_method || 'efectivo',
-        amount: parseFloat(inv.amount || 0),
-        user_name: inv.user_name || 'Cajero',
-        branch_name: inv.branch_name,
-        date: inv.created_at
-      });
-    });
-
-    // 2. Movimientos de Caja Operativos (Ingresos extras, abonos y Egresos de turnos)
-    let movQuery = knex('cash_movements as cm')
-      .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
-      .join('users as u', 'cr.user_id', 'u.id')
-      .leftJoin('branches as b', 'cr.branch_id', 'b.id')
-      .where('cr.business_id', businessId)
-      .whereIn('cm.type', ['ingreso', 'egreso', 'retiro', 'gasto'])
-      .whereNot('cm.type', 'venta')
-      .whereRaw("LOWER(COALESCE(cm.description, '')) NOT LIKE 'factura %'")
-      .whereRaw('DATE(cm.created_at) BETWEEN ? AND ?', [start, end])
-      .select(
-        'cm.id',
-        'cm.type',
-        'cm.amount',
-        'cm.payment_method',
-        'cm.description',
-        'cm.created_at',
-        'u.full_name as user_name',
-        knex.raw("COALESCE(b.name, 'Principal') as branch_name")
-      );
-
-    if (branchId) movQuery.andWhere('cr.branch_id', branchId);
-    const movements = await movQuery.orderBy('cm.created_at', 'desc');
-
-    movements.forEach(m => {
-      const typeLower = (m.type || '').toLowerCase();
-      const desc = m.description || '';
-      const descLower = desc.toLowerCase();
-
-      // Descartar cualquier movimiento de venta o vinculado a factura POS (ya registrado como ingreso en Sección 1 Invoices)
-      if (typeLower === 'venta' || descLower.startsWith('factura fac-') || descLower.startsWith('factura #') || descLower.startsWith('factura ')) {
-        return;
-      }
-
-      // Si es egreso por nómina, se representa en la sección de nómina (Sección 3) para mostrar detalles del empleado
-      if (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina')) {
-        return;
-      }
-
-      const isIngreso = typeLower === 'ingreso';
-      const isGasto = ['egreso', 'retiro', 'gasto'].includes(typeLower);
-
-      // Si no es un ingreso legítimo ni un gasto legítimo, descartar
-      if (!isIngreso && !isGasto) return;
-
-      const category = isIngreso
-        ? (descLower.includes('abono') ? 'Abono a Cartera / CxC' : 'Ingreso de Caja')
-        : 'Egreso / Gasto de Caja';
-
-      items.push({
-        id: `mov-${m.id}`,
-        type: isIngreso ? 'ingreso' : 'gasto',
-        category,
-        reference: `MOV-${m.id}`,
-        description: desc || (isIngreso ? 'Ingreso de Caja' : 'Egreso de Caja'),
-        payment_method: m.payment_method || 'efectivo',
-        amount: parseFloat(m.amount || 0),
-        user_name: m.user_name || 'Cajero',
-        branch_name: m.branch_name,
-        date: m.created_at
-      });
-    });
-
-    // 3. Nómina y Liquidaciones Pagadas
-    let payQuery = knex('payroll as p')
-      .join('employees as e', 'p.employee_id', 'e.id')
-      .where('p.business_id', businessId)
-      .whereIn('p.status', ['pagada', 'aprobada'])
-      .whereRaw('DATE(COALESCE(p.paid_at, p.period_start)) BETWEEN ? AND ?', [start, end])
-      .select(
-        'p.id',
-        'p.net_pay as amount',
-        'p.payment_type',
-        'p.days_worked',
-        'p.notes',
-        'p.paid_at',
-        'p.period_start',
-        'p.created_at',
-        knex.raw("e.first_name || ' ' || e.last_name as employee_name")
-      );
-
-    const payrollRows = await payQuery.orderBy('p.id', 'desc');
-
-    payrollRows.forEach(p => {
-      items.push({
-        id: `pay-${p.id}`,
-        type: 'gasto',
-        category: 'Nómina & Jornales',
-        reference: `NOM-${p.id}`,
-        description: `Pago a ${p.employee_name}: ${p.notes || `Liquidación ${p.payment_type} (${p.days_worked} días)`}`,
-        payment_method: 'efectivo / transferencia',
-        amount: parseFloat(p.amount || 0),
-        user_name: p.employee_name,
-        branch_name: 'Sucursal',
-        date: p.paid_at || p.period_start || p.created_at
-      });
-    });
-
-    // 4. Cuentas por Pagar (CxP) a Proveedores
-    let apQuery = knex('accounts_payable as ap')
-      .join('suppliers as s', 'ap.supplier_id', 's.id')
-      .where('ap.business_id', businessId)
-      .where('ap.paid_amount', '>', 0)
-      .whereRaw('DATE(ap.updated_at) BETWEEN ? AND ?', [start, end])
-      .select(
-        'ap.id',
-        'ap.paid_amount as amount',
-        'ap.notes',
-        'ap.updated_at',
-        's.name as supplier_name'
-      );
-
-    const apRows = await apQuery.orderBy('ap.updated_at', 'desc');
-    apRows.forEach(ap => {
-      items.push({
-        id: `ap-${ap.id}`,
-        type: 'gasto',
-        category: 'Pago a Proveedor (CxP)',
-        reference: `CXP-${ap.id}`,
-        description: `Pago proveedor: ${ap.supplier_name}${ap.notes ? ` (${ap.notes})` : ''}`,
-        payment_method: 'transferencia / contado',
-        amount: parseFloat(ap.amount || 0),
-        user_name: ap.supplier_name,
-        branch_name: 'Sucursal',
-        date: ap.updated_at
-      });
-    });
-
-    // Ordenar cronológicamente descendente
-    items.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-    // Totales globales del período
-    const totalIncome = items.filter(i => i.type === 'ingreso').reduce((sum, i) => sum + i.amount, 0);
-    const totalExpense = items.filter(i => i.type === 'gasto').reduce((sum, i) => sum + i.amount, 0);
-    const netBalance = totalIncome - totalExpense;
-
-    // Aplicar filtros de tipo y búsqueda
-    let filteredItems = items;
-    if (type && type !== 'todos' && type !== 'all') {
-      filteredItems = filteredItems.filter(i => i.type === type);
-    }
-    if (search) {
-      const q = search.toLowerCase().trim();
-      filteredItems = filteredItems.filter(i =>
-        (i.description || '').toLowerCase().includes(q) ||
-        (i.reference || '').toLowerCase().includes(q) ||
-        (i.user_name || '').toLowerCase().includes(q) ||
-        (i.category || '').toLowerCase().includes(q) ||
-        (i.payment_method || '').toLowerCase().includes(q)
-      );
-    }
-
-    res.json({
-      period: { startDate: start, endDate: end },
-      summary: {
-        totalIncome,
-        totalExpense,
-        netBalance,
-        totalCount: items.length
-      },
-      items: filteredItems
-    });
+    const data = await fetchIncomeExpensesData(knex, businessId, branchId, { startDate, endDate, type, search });
+    res.json(data);
   } catch (err) {
     console.error('Error al obtener ingresos y gastos:', err);
     res.status(500).json({ error: 'Error al obtener ingresos y gastos: ' + err.message });
+  }
+};
+
+exports.exportIncomeExpensesExcel = async (req, res) => {
+  try {
+    const { businessId, branchId } = req.tenant;
+    const { startDate, endDate, type, search } = req.query;
+
+    const data = await fetchIncomeExpensesData(knex, businessId, branchId, { startDate, endDate, type, search });
+    const { items, summary, period } = data;
+
+    const settings = await knex('settings')
+      .where('business_id', businessId)
+      .whereNull('branch_id')
+      .first() || { business_name: 'GastrosPOS ERP' };
+
+    let branchName = 'Todas las Sucursales';
+    if (branchId) {
+      const b = await knex('branches').where({ id: branchId, business_id: businessId }).first();
+      if (b) branchName = b.name;
+    }
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = settings.business_name || 'GastrosPOS ERP';
+    workbook.created = new Date();
+
+    const sheet = workbook.addWorksheet('Ingresos y Gastos', {
+      views: [{ showGridLines: true }]
+    });
+
+    // Ancho de Columnas
+    sheet.columns = [
+      { key: 'date', width: 23 },
+      { key: 'type', width: 15 },
+      { key: 'category', width: 32 },
+      { key: 'reference', width: 18 },
+      { key: 'description', width: 46 },
+      { key: 'payment_method', width: 22 },
+      { key: 'user_name', width: 28 },
+      { key: 'branch_name', width: 20 },
+      { key: 'amount', width: 22 }
+    ];
+
+    // Fila 1: Espaciado
+    sheet.addRow([]);
+
+    // Fila 2: Título Principal
+    const titleRow = sheet.addRow(['', `${settings.business_name ? settings.business_name.toUpperCase() : 'SISTEMA POS'} — REPORTE DE INGRESOS Y GASTOS`]);
+    titleRow.font = { name: 'Calibri', size: 15, bold: true, color: { argb: 'FF0F172A' } };
+    sheet.mergeCells('B2:I2');
+
+    // Fila 3: Subtítulo Descriptivo
+    const subRow = sheet.addRow(['', 'Flujo Integral Operativo de Caja, Ventas, Nómina, Proveedores y Compras (OC)']);
+    subRow.font = { name: 'Calibri', size: 10.5, italic: true, color: { argb: 'FF475569' } };
+    sheet.mergeCells('B3:I3');
+
+    // Fila 4: Metadatos del Reporte
+    const metaRow = sheet.addRow(['', `Período: ${period.startDate} al ${period.endDate}  |  Sucursal: ${branchName}  |  Fecha de Emisión: ${new Date().toLocaleString('es-CO')}`]);
+    metaRow.font = { name: 'Calibri', size: 9.5, color: { argb: 'FF64748B' } };
+    sheet.mergeCells('B4:I4');
+
+    // Fila 5: Espacio
+    sheet.addRow([]);
+
+    // Fila 6 y 7: Tarjetas Resumen Ejecutivo (KPIs)
+    sheet.mergeCells('B6:C6');
+    sheet.mergeCells('B7:C7');
+    sheet.getCell('B6').value = 'TOTAL INGRESOS (+)';
+    sheet.getCell('B7').value = summary.totalIncome;
+    sheet.getCell('B6').font = { size: 9, bold: true, color: { argb: 'FF065F46' } };
+    sheet.getCell('B7').font = { size: 13, bold: true, color: { argb: 'FF065F46' } };
+    sheet.getCell('B6').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
+    sheet.getCell('B7').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
+    sheet.getCell('B6').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('B7').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('B7').numFmt = '"$"#,##0';
+
+    sheet.mergeCells('E6:F6');
+    sheet.mergeCells('E7:F7');
+    sheet.getCell('E6').value = 'TOTAL GASTOS (-)';
+    sheet.getCell('E7').value = summary.totalExpense;
+    sheet.getCell('E6').font = { size: 9, bold: true, color: { argb: 'FF991B1B' } };
+    sheet.getCell('E7').font = { size: 13, bold: true, color: { argb: 'FF991B1B' } };
+    sheet.getCell('E6').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+    sheet.getCell('E7').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+    sheet.getCell('E6').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('E7').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('E7').numFmt = '"$"#,##0';
+
+    sheet.mergeCells('H6:I6');
+    sheet.mergeCells('H7:I7');
+    sheet.getCell('H6').value = 'BALANCE NETO';
+    sheet.getCell('H7').value = summary.netBalance;
+    const isNetPositive = summary.netBalance >= 0;
+    sheet.getCell('H6').font = { size: 9, bold: true, color: { argb: isNetPositive ? 'FF1E40AF' : 'FF991B1B' } };
+    sheet.getCell('H7').font = { size: 13, bold: true, color: { argb: isNetPositive ? 'FF1E40AF' : 'FF991B1B' } };
+    sheet.getCell('H6').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isNetPositive ? 'FFDBEAFE' : 'FFFEE2E2' } };
+    sheet.getCell('H7').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isNetPositive ? 'FFDBEAFE' : 'FFFEE2E2' } };
+    sheet.getCell('H6').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('H7').alignment = { horizontal: 'center', vertical: 'middle' };
+    sheet.getCell('H7').numFmt = '"$"#,##0';
+
+    // Fila 8: Espacio
+    sheet.addRow([]);
+
+    // Fila 9: Encabezados de la Tabla
+    const headers = [
+      'Fecha y Hora',
+      'Tipo',
+      'Categoría',
+      'Referencia',
+      'Concepto / Descripción',
+      'Método de Pago',
+      'Responsable / Proveedor',
+      'Sucursal',
+      'Monto (COP)'
+    ];
+    const headerRow = sheet.addRow(headers);
+    headerRow.height = 26;
+    headerRow.eachCell((cell, colNum) => {
+      cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } };
+      cell.alignment = {
+        vertical: 'middle',
+        horizontal: colNum === 9 ? 'right' : (colNum === 2 || colNum === 4 || colNum === 8 ? 'center' : 'left')
+      };
+      cell.border = {
+        top: { style: 'medium', color: { argb: 'FF0F172A' } },
+        bottom: { style: 'medium', color: { argb: 'FF0F172A' } }
+      };
+    });
+
+    // Filas de Datos
+    items.forEach((item, index) => {
+      const isIngreso = item.type === 'ingreso';
+      const rowDate = item.date ? new Date(item.date).toLocaleString('es-CO') : '';
+      const row = sheet.addRow([
+        rowDate,
+        isIngreso ? 'INGRESO (+)' : 'GASTO (-)',
+        item.category || '',
+        item.reference || '',
+        item.description || '',
+        (item.payment_method || '').toUpperCase(),
+        item.user_name || '',
+        item.branch_name || 'Principal',
+        item.amount || 0
+      ]);
+      row.height = 20;
+
+      const isEven = index % 2 === 0;
+      const bgArgb = isEven ? 'FFFFFFFF' : 'FFF8FAFC';
+
+      row.eachCell((cell, colNum) => {
+        cell.font = { name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgArgb } };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+          right: { style: 'thin', color: { argb: 'FFE2E8F0' } }
+        };
+
+        if (colNum === 1) cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        if (colNum === 2) {
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          cell.font = { name: 'Calibri', size: 9.5, bold: true, color: { argb: isIngreso ? 'FF15803D' : 'FFB91C1C' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isIngreso ? 'FFF0FDF4' : 'FFFEF2F2' } };
+        }
+        if (colNum === 4 || colNum === 6 || colNum === 8) {
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        }
+        if (colNum === 9) {
+          cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          cell.numFmt = '"$"#,##0';
+          cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: isIngreso ? 'FF166534' : 'FF991B1B' } };
+        }
+      });
+    });
+
+    // Fila de Totales
+    if (items.length > 0) {
+      const footerRow = sheet.addRow([
+        'TOTALES',
+        '',
+        '',
+        '',
+        `Registros procesados: ${items.length}`,
+        '',
+        '',
+        'Balance Neto:',
+        summary.netBalance
+      ]);
+      footerRow.height = 24;
+      footerRow.eachCell((cell, colNum) => {
+        cell.font = { name: 'Calibri', size: 10.5, bold: true, color: { argb: 'FF0F172A' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF94A3B8' } },
+          bottom: { style: 'double', color: { argb: 'FF0F172A' } }
+        };
+        if (colNum === 9) {
+          cell.alignment = { vertical: 'middle', horizontal: 'right' };
+          cell.numFmt = '"$"#,##0';
+          cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: summary.netBalance >= 0 ? 'FF1E40AF' : 'FF991B1B' } };
+        }
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=Ingresos_y_Gastos_${period.startDate}_al_${period.endDate}.xlsx`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('Error al exportar ingresos y gastos a Excel:', err);
+    res.status(500).json({ error: 'Error al exportar reporte de ingresos y gastos a Excel' });
   }
 };
 
@@ -1606,11 +1919,159 @@ exports.syncCashMovementsToJournal = async (req, res) => {
       console.warn('Advertencia al limpiar inventario de insumos inactivos:', cleanErr.message);
     }
 
-    res.json({ message: `Sincronización completada. ${createdCount} asientos contables de egresos/ingresos generados.`, createdCount });
+    // Sincronizar también órdenes de compra recibidas al libro diario
+    let poSyncedCount = 0;
+    try {
+      const orders = await knex('purchase_orders')
+        .where('business_id', businessId)
+        .whereIn('status', ['recibida', 'cerrada', 'parcial'])
+        .select('id', 'branch_id', 'user_id');
+      for (const po of orders) {
+        const poEntry = await createJournalEntryForPurchaseOrder(knex, po.id, businessId, po.branch_id || branchId, po.user_id || userId);
+        if (poEntry) poSyncedCount++;
+      }
+    } catch (poErr) {
+      console.warn('Advertencia al sincronizar órdenes de compra:', poErr.message);
+    }
+
+    res.json({ message: `Sincronización completada. ${createdCount} asientos de movimientos de caja y ${poSyncedCount} de órdenes de compra sincronizados.`, createdCount, poSyncedCount });
   } catch (err) {
     console.error('Error al sincronizar movimientos de caja con contabilidad:', err);
     res.status(500).json({ error: 'Error al sincronizar movimientos con el libro diario' });
   }
 };
+
+// ==================== GENERACIÓN AUTOMÁTICA DE ASIENTOS POR ÓRDENES DE COMPRA ====================
+
+const createJournalEntryForPurchaseOrder = async (db, poId, businessId, branchId, userId) => {
+  const po = await db('purchase_orders as po')
+    .join('suppliers as s', 'po.supplier_id', 's.id')
+    .where({ 'po.id': poId, 'po.business_id': businessId })
+    .select('po.*', 's.name as supplier_name')
+    .first();
+
+  if (!po) return null;
+
+  const items = await db('purchase_order_items').where('purchase_order_id', po.id);
+  let receivedSubtotal = 0;
+  items.forEach(i => {
+    receivedSubtotal += parseFloat(i.quantity_received || 0) * parseFloat(i.unit_cost || 0);
+  });
+
+  const existingEntry = await db('journal_entries')
+    .where({
+      business_id: businessId,
+      reference_type: 'purchase_order',
+      reference_id: po.id
+    })
+    .first();
+
+  if (receivedSubtotal <= 0) {
+    if (existingEntry) {
+      await db('journal_entries').where({ id: existingEntry.id }).del();
+    }
+    return null;
+  }
+
+  const poTaxTotal = parseFloat(po.tax_total || 0);
+  const poSubtotal = parseFloat(po.subtotal || 0);
+  const taxRatio = poSubtotal > 0 && poTaxTotal > 0 ? (poTaxTotal / poSubtotal) : 0;
+  const receivedTax = receivedSubtotal * taxRatio;
+  const receivedTotal = parseFloat((receivedSubtotal + receivedTax).toFixed(2));
+
+  // Buscar cuentas en chart_of_accounts
+  const costAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '5.1.01' })
+    .first() || await db('chart_of_accounts').where({ business_id: businessId, account_type: 'gasto' }).first();
+
+  const apAccount = await db('chart_of_accounts')
+    .where({ business_id: businessId, code: '2.1.01' })
+    .first() || await db('chart_of_accounts').where({ business_id: businessId, account_type: 'pasivo' }).first();
+
+  if (!costAccount || !apAccount) {
+    console.warn('Cuentas contables para OC no encontradas en chart_of_accounts');
+    return null;
+  }
+
+  const entryDate = po.received_date
+    ? new Date(po.received_date).toISOString().slice(0, 10)
+    : (po.order_date ? new Date(po.order_date).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10));
+
+  let jEntryId = existingEntry ? existingEntry.id : null;
+
+  if (existingEntry) {
+    await db('journal_entries').where({ id: existingEntry.id }).update({
+      entry_date: entryDate,
+      description: `Recepción Orden de Compra ${po.order_number} - ${po.supplier_name}`,
+      updated_at: db.fn.now()
+    });
+    await db('journal_entry_lines').where({ journal_entry_id: existingEntry.id }).del();
+  } else {
+    const count = await db('journal_entries').where('business_id', businessId).count('id as c').first();
+    const entryNum = `AST-OC-${po.order_number || String(parseInt(count.c) + 1).padStart(6, '0')}`;
+
+    const [newEntry] = await db('journal_entries').insert({
+      business_id: businessId,
+      branch_id: po.branch_id || branchId || null,
+      entry_number: entryNum,
+      entry_date: entryDate,
+      description: `Recepción Orden de Compra ${po.order_number} - ${po.supplier_name}`,
+      reference_type: 'purchase_order',
+      reference_id: po.id,
+      status: 'aprobado',
+      user_id: po.user_id || userId || 1
+    }).returning('*');
+    jEntryId = newEntry.id;
+  }
+
+  // Débito a Costo de Ventas (Gasto)
+  await db('journal_entry_lines').insert({
+    journal_entry_id: jEntryId,
+    account_id: costAccount.id,
+    debit: receivedTotal,
+    credit: 0,
+    description: `Recepción OC ${po.order_number}: Compra mercancía e insumos`
+  });
+
+  // Crédito a Cuentas por Pagar Proveedores (Pasivo)
+  await db('journal_entry_lines').insert({
+    journal_entry_id: jEntryId,
+    account_id: apAccount.id,
+    debit: 0,
+    credit: receivedTotal,
+    description: `Proveedor: ${po.supplier_name} (OC ${po.order_number})`
+  });
+
+  return { id: jEntryId, amount: receivedTotal };
+};
+
+exports.createJournalEntryForPurchaseOrder = createJournalEntryForPurchaseOrder;
+
+exports.syncPurchaseOrdersToJournal = async (req, res) => {
+  try {
+    const { businessId, branchId } = req.tenant;
+    const userId = req.user?.id || 1;
+
+    const orders = await knex('purchase_orders')
+      .where('business_id', businessId)
+      .whereIn('status', ['recibida', 'cerrada', 'parcial'])
+      .select('id', 'branch_id', 'user_id');
+
+    let syncedCount = 0;
+    for (const po of orders) {
+      const entry = await createJournalEntryForPurchaseOrder(knex, po.id, businessId, po.branch_id || branchId, po.user_id || userId);
+      if (entry) syncedCount++;
+    }
+
+    res.json({
+      message: `Sincronización de órdenes de compra completada. ${syncedCount} asientos contables generados o actualizados.`,
+      syncedCount
+    });
+  } catch (err) {
+    console.error('Error al sincronizar órdenes de compra con contabilidad:', err);
+    res.status(500).json({ error: 'Error al sincronizar órdenes de compra con el libro diario' });
+  }
+};
+
 
 

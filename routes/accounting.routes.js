@@ -9,6 +9,8 @@ router.use(auth, tenantMiddleware);
 // Dashboard Financiero General
 router.get('/dashboard', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getFinancialDashboard);
 router.get('/income-expenses', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getIncomeExpenses);
+router.get('/income-expenses/export/excel', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.exportIncomeExpensesExcel);
+router.post('/sync-purchase-orders', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.syncPurchaseOrdersToJournal);
 
 // Plan de cuentas
 router.get('/accounts', authorizeRoles('super_admin', 'admin', 'gerente'), ctrl.getChartOfAccounts);

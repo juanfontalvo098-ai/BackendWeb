@@ -707,12 +707,15 @@ exports.getIncomeExpenses = async (req, res) => {
       });
     });
 
-    // 2. Movimientos de Caja (Ingresos y Egresos de turnos)
+    // 2. Movimientos de Caja Operativos (Ingresos extras, abonos y Egresos de turnos)
     let movQuery = knex('cash_movements as cm')
       .join('cash_registers as cr', 'cm.cash_register_id', 'cr.id')
       .join('users as u', 'cr.user_id', 'u.id')
       .leftJoin('branches as b', 'cr.branch_id', 'b.id')
       .where('cr.business_id', businessId)
+      .whereIn('cm.type', ['ingreso', 'egreso', 'retiro', 'gasto'])
+      .whereNot('cm.type', 'venta')
+      .whereRaw("LOWER(COALESCE(cm.description, '')) NOT LIKE 'factura %'")
       .whereRaw('DATE(cm.created_at) BETWEEN ? AND ?', [start, end])
       .select(
         'cm.id',
@@ -729,21 +732,36 @@ exports.getIncomeExpenses = async (req, res) => {
     const movements = await movQuery.orderBy('cm.created_at', 'desc');
 
     movements.forEach(m => {
-      const isIngreso = m.type === 'ingreso';
-      const desc = m.description || (isIngreso ? 'Ingreso de Caja' : 'Egreso de Caja');
+      const typeLower = (m.type || '').toLowerCase();
+      const desc = m.description || '';
       const descLower = desc.toLowerCase();
 
-      // Si es egreso por nómina, se representará en la sección de nómina para mostrar detalles del empleado
-      if (!isIngreso && (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina'))) {
+      // Descartar cualquier movimiento de venta o vinculado a factura POS (ya registrado como ingreso en Sección 1 Invoices)
+      if (typeLower === 'venta' || descLower.startsWith('factura fac-') || descLower.startsWith('factura #') || descLower.startsWith('factura ')) {
         return;
       }
+
+      // Si es egreso por nómina, se representa en la sección de nómina (Sección 3) para mostrar detalles del empleado
+      if (descLower.startsWith('pago nómina') || descLower.startsWith('pago nomina')) {
+        return;
+      }
+
+      const isIngreso = typeLower === 'ingreso';
+      const isGasto = ['egreso', 'retiro', 'gasto'].includes(typeLower);
+
+      // Si no es un ingreso legítimo ni un gasto legítimo, descartar
+      if (!isIngreso && !isGasto) return;
+
+      const category = isIngreso
+        ? (descLower.includes('abono') ? 'Abono a Cartera / CxC' : 'Ingreso de Caja')
+        : 'Egreso / Gasto de Caja';
 
       items.push({
         id: `mov-${m.id}`,
         type: isIngreso ? 'ingreso' : 'gasto',
-        category: isIngreso ? 'Ingreso de Caja / Abono' : 'Egreso / Gasto de Caja',
+        category,
         reference: `MOV-${m.id}`,
-        description: desc,
+        description: desc || (isIngreso ? 'Ingreso de Caja' : 'Egreso de Caja'),
         payment_method: m.payment_method || 'efectivo',
         amount: parseFloat(m.amount || 0),
         user_name: m.user_name || 'Cajero',
